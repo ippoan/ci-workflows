@@ -27,6 +27,15 @@ jobs:
     secrets: inherit
 ```
 
+### Cross-org (ohishi-exp etc.)
+
+`secrets: inherit` は **同一 org 内でのみ動作**する。cross-org の場合は明示的に渡す:
+
+```yaml
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+```
+
 ## Inputs
 
 | Input | Default | Description |
@@ -42,7 +51,6 @@ jobs:
 | `post_install_script` | | Script after npm install |
 | `use_auth_client_dev` | `false` | Use auth-client dev action |
 | `test_command` | `npx vitest run --coverage ...` | Test command |
-| `deploy_on_tag` | `false` | Deploy on v* tags instead of main push |
 | `deploy_staging_script` | `npm run build && npx wrangler deploy --env staging` | Staging deploy script |
 | `deploy_release_script` | `npm run build && npx wrangler deploy` | Release deploy script |
 | `integration_compose_file` | `docker-compose.test.yml` | Docker Compose file |
@@ -60,11 +68,16 @@ jobs:
 | typecheck | always | Type checking |
 | integration-test | `has_integration=true` | Docker Compose + live tests |
 | deploy-staging | PR, after test+typecheck pass | Cloudflare Workers staging |
-| deploy-release | main push or v* tag | Cloudflare Workers production |
+| deploy-release | v* tag push | Cloudflare Workers production |
 
 ## Features
 
 - **Coverage 100% enforcement**: If `scripts/check_coverage_100.mjs` exists, runs it automatically
 - **Job Summary**: Test results + coverage table + 100% file tracking
 - **coverage-final.json fallback**: Works with both `coverage-summary.json` and `coverage-final.json`
-- **Tag-based deploy**: Set `deploy_on_tag: true` for v* tag releases (skips test on tag push)
+- **Tag-based deploy**: deploy-release は v* タグ push 時のみ実行（caller に `tags: ['v*']` を追加すること）
+
+## Notes
+
+- `wrangler.toml` に `account_id` が必要（CI で Cloudflare アカウントを特定するため）
+- cross-org では `secrets: inherit` が動かないため、明示的に secrets を渡す
