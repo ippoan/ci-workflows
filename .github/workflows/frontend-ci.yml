@@ -79,9 +79,6 @@ on:
       CLOUDFLARE_API_TOKEN:
         description: Cloudflare API token for wrangler deploy
         required: false
-      GITHUB_TOKEN:
-        description: GitHub token for npm packages and GHCR
-        required: false
 
 jobs:
   pr-limit:
