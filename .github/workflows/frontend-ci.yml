@@ -43,10 +43,6 @@ on:
         description: Test command
         type: string
         default: 'npx vitest run --coverage --reporter=default --reporter=json --outputFile.json=coverage/test-results.json'
-      deploy_on_tag:
-        description: Deploy release on v* tags instead of main push
-        type: boolean
-        default: false
       deploy_staging_script:
         description: Full script for staging deploy (build + deploy)
         type: string
@@ -95,8 +91,7 @@ jobs:
     if: >-
       always() &&
       inputs.has_tests &&
-      (needs.pr-limit.result == 'success' || needs.pr-limit.result == 'skipped') &&
-      !(inputs.deploy_on_tag && startsWith(github.ref, 'refs/tags/'))
+      (needs.pr-limit.result == 'success' || needs.pr-limit.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -353,8 +348,7 @@ jobs:
     if: >-
       always() &&
       inputs.has_integration &&
-      (needs.pr-limit.result == 'success' || needs.pr-limit.result == 'skipped') &&
-      !(inputs.deploy_on_tag && startsWith(github.ref, 'refs/tags/'))
+      (needs.pr-limit.result == 'success' || needs.pr-limit.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -477,10 +471,7 @@ jobs:
     if: >-
       always() &&
       inputs.has_deploy &&
-      (
-        (!inputs.deploy_on_tag && github.ref == 'refs/heads/main' && github.event_name == 'push') ||
-        (inputs.deploy_on_tag && startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push')
-      ) &&
+      startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success' &&
       (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped')
