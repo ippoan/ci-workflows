@@ -89,9 +89,16 @@ jobs:
     name: PR Limit Check
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: ippoan/ci-workflows/.github/actions/pr-limit@main
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr merge ${{ github.event.number }} --auto --squash --repo ${{ github.repository }} 2>&1 || true
 
   branch-protection:
     name: Branch Protection Check
