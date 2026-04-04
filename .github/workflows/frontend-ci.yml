@@ -95,10 +95,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ippoan/ci-workflows/.github/actions/pr-limit@main
-      - name: Enable auto-merge
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr merge ${{ github.event.number }} --auto --squash --repo ${{ github.repository }} 2>&1 || true
 
   branch-protection:
     name: Branch Protection Check
@@ -645,3 +641,23 @@ jobs:
             fi
           fi
           eval "$CMD"
+
+  auto-merge:
+    name: Auto Merge
+    needs: [test, typecheck, integration-test, branch-protection]
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      needs.typecheck.result == 'success' &&
+      (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
+      (needs.branch-protection.result == 'success' || needs.branch-protection.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr merge ${{ github.event.number }} --auto --squash --repo ${{ github.repository }} 2>&1 || true
