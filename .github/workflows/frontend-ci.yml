@@ -658,7 +658,7 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Enable auto-merge
+      - name: Squash merge
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh pr merge ${{ github.event.number }} --auto --squash --repo ${{ github.repository }} 2>&1 || true
+        run: gh pr merge ${{ github.event.number }} --squash --repo ${{ github.repository }} 2>&1 || true
