@@ -644,14 +644,15 @@ jobs:
 
   auto-merge:
     name: Auto Merge
-    needs: [test, typecheck, integration-test, branch-protection]
+    needs: [test, typecheck, integration-test, branch-protection, deploy-staging]
     if: >-
       always() &&
       github.event_name == 'pull_request' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success' &&
       (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
-      (needs.branch-protection.result == 'success' || needs.branch-protection.result == 'skipped')
+      (needs.branch-protection.result == 'success' || needs.branch-protection.result == 'skipped') &&
+      (needs.deploy-staging.result == 'success' || needs.deploy-staging.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: write
