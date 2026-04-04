@@ -155,21 +155,29 @@ jobs:
             ERRORS+=("No 'ci /' required status check found")
           fi
 
+          # Check: auto-merge enabled
+          REPO_INFO=$(curl -sf "https://api.github.com/repos/$REPO") || true
+          AUTO_MERGE=$(echo "$REPO_INFO" | jq -r '.allow_auto_merge // false')
+          if [ "$AUTO_MERGE" != "true" ]; then
+            ERRORS+=("Auto-merge is not enabled (Settings > General > Allow auto-merge)")
+          fi
+
           if [ ${#ERRORS[@]} -gt 0 ]; then
-            echo "::error::Branch protection issues on $REPO/$BRANCH:"
+            echo "::error::Repository settings issues on $REPO/$BRANCH:"
             for e in "${ERRORS[@]}"; do
               echo "::error::  - $e"
             done
             exit 1
           fi
 
-          echo "✅ Branch protection verified on $REPO/$BRANCH"
+          echo "✅ Branch protection and repo settings verified on $REPO/$BRANCH"
           echo "$PROTECTION" | jq '{
             required_checks: [.required_status_checks.checks[].context],
             enforce_admins: .enforce_admins.enabled,
             force_push: .allow_force_pushes.enabled,
             deletions: .allow_deletions.enabled
           }'
+          echo "auto_merge: $AUTO_MERGE"
 
   test:
     name: Vitest + Coverage
