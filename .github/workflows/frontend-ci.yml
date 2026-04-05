@@ -165,6 +165,18 @@ jobs:
             ERRORS+=("Auto-merge is not enabled (Settings > General > Allow auto-merge)")
           fi
 
+          # Check: Ruleset exists with no bypass actors (admin bypass prevention)
+          RULESETS=$(curl -sf "https://api.github.com/repos/$REPO/rulesets" \
+            -H "Authorization: Bearer ${{ github.token }}" 2>/dev/null) || true
+          if [ -n "$RULESETS" ] && [ "$RULESETS" != "[]" ]; then
+            HAS_NO_BYPASS=$(echo "$RULESETS" | jq '[.[] | select(.enforcement == "active" and (.bypass_actors | length) == 0)] | length > 0')
+            if [ "$HAS_NO_BYPASS" != "true" ]; then
+              ERRORS+=("No active Ruleset with empty bypass_actors found (admin can bypass CI with --admin)")
+            fi
+          else
+            ERRORS+=("No Rulesets configured (admin can bypass CI with gh pr merge --admin)")
+          fi
+
           if [ ${#ERRORS[@]} -gt 0 ]; then
             echo "::error::Repository settings issues on $REPO/$BRANCH:"
             for e in "${ERRORS[@]}"; do
