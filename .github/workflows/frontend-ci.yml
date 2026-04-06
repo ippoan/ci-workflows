@@ -516,6 +516,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Fetch init_local_db.sql from rust-alc-api
+        run: |
+          mkdir -p tests/fixtures
+          curl -sfL "https://raw.githubusercontent.com/ippoan/rust-alc-api/main/scripts/init_local_db.sql" \
+            -o tests/fixtures/init_local_db.sql
+
       - name: Start API + DB containers
         run: docker compose -f ${{ inputs.integration_compose_file }} up -d --wait
         timeout-minutes: 5
