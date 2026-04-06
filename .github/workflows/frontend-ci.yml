@@ -676,12 +676,7 @@ jobs:
       (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
       (needs.branch-protection.result == 'success' || needs.branch-protection.result == 'skipped') &&
       (needs.deploy-staging.result == 'success' || needs.deploy-staging.result == 'skipped')
-    runs-on: ubuntu-latest
+    uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
     permissions:
       contents: write
       pull-requests: write
-    steps:
-      - name: Squash merge
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr merge ${{ github.event.number }} --squash --repo ${{ github.repository }} 2>&1 || true
