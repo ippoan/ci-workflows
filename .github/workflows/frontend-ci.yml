@@ -107,11 +107,16 @@ jobs:
           REPO="${{ github.repository }}"
           BRANCH="main"
 
-          # Use unauthenticated API for public repos (GITHUB_TOKEN lacks admin:read)
-          BRANCH_INFO=$(curl -sf "https://api.github.com/repos/$REPO/branches/$BRANCH") || {
-            echo "::error::Cannot fetch branch info for $REPO/$BRANCH"
+          # Fetch branch info with retry (unauthenticated API can hit rate limits)
+          for i in 1 2 3; do
+            BRANCH_INFO=$(curl -sf "https://api.github.com/repos/$REPO/branches/$BRANCH") && break
+            echo "::warning::Attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          if [ -z "$BRANCH_INFO" ]; then
+            echo "::error::Cannot fetch branch info for $REPO/$BRANCH after 3 attempts"
             exit 1
-          }
+          fi
 
           PROTECTED=$(echo "$BRANCH_INFO" | jq -r '.protected')
           if [ "$PROTECTED" != "true" ]; then
