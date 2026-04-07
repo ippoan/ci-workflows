@@ -684,8 +684,6 @@ jobs:
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success'
     runs-on: ubuntu-latest
-    permissions:
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -717,8 +715,6 @@ jobs:
       startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push' &&
       needs.deploy-release.result == 'success'
     runs-on: ubuntu-latest
-    permissions:
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
