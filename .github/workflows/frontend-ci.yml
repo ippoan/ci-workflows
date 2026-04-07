@@ -76,7 +76,11 @@ on:
         type: string
         default: ''
       has_deploy:
-        description: Whether to run deploy jobs
+        description: Whether to run deploy jobs (controls both staging and release)
+        type: boolean
+        default: true
+      has_staging_deploy:
+        description: Whether to run staging deploy (overrides has_deploy for staging only)
         type: boolean
         default: true
     secrets:
@@ -548,6 +552,7 @@ jobs:
     if: >-
       always() &&
       inputs.has_deploy &&
+      inputs.has_staging_deploy &&
       github.event_name == 'pull_request' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success' &&
