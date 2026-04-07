@@ -97,6 +97,7 @@ jobs:
 | `post_install_script` | `''` | install 後のスクリプト |
 | `deploy_staging_script` | `''` | staging デプロイスクリプト |
 | `deploy_release_script` | `''` | リリースデプロイスクリプト |
+| `npm_publish_directory` | `''` | npm パッケージディレクトリ (設定時に publish 有効) |
 
 ## よくあるトラブル
 
