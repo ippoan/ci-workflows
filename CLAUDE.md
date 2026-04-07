@@ -98,6 +98,9 @@ jobs:
 | `deploy_staging_script` | `''` | staging デプロイスクリプト |
 | `deploy_release_script` | `''` | リリースデプロイスクリプト |
 | `npm_publish_directory` | `''` | npm パッケージディレクトリ (設定時に publish 有効) |
+| `npm_publish_name` | `''` | npm パッケージ名 (propagation 用、例: `@ippoan/auth-client`) |
+| `npm_publish_propagate_repos` | `''` | publish 後に自動更新する対象リポジトリ (カンマ区切り) |
+| `npm_publish_propagate_dirs` | `''` | 対象リポジトリの working directory (カンマ区切り) |
 
 ## よくあるトラブル
 

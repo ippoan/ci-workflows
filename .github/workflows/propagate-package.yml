@@ -1,0 +1,132 @@
+name: Propagate Package Update
+
+on:
+  workflow_call:
+    inputs:
+      package_name:
+        description: 'npm package name (e.g. "@ippoan/auth-client")'
+        type: string
+        required: true
+      package_version:
+        description: 'Version to install (e.g. "^0.2.10"). If empty, uses latest from registry.'
+        type: string
+        default: ''
+      target_repos:
+        description: 'Comma-separated list of target repos (e.g. "ippoan/nuxt-notify,ippoan/alc-app")'
+        type: string
+        required: true
+      working_directories:
+        description: 'Comma-separated working directories per repo (e.g. ".,.,web"). Must match target_repos order. Default "." for all.'
+        type: string
+        default: ''
+      npm_scope:
+        description: 'npm scope for GitHub Packages registry (e.g. "@ippoan")'
+        type: string
+        default: '@ippoan'
+    secrets:
+      PAT:
+        description: 'PAT with repo scope for cross-repo operations'
+        required: true
+
+jobs:
+  propagate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ inputs.package_version }}" ]; then
+            echo "version=${{ inputs.package_version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "${{ inputs.npm_scope }}:registry=https://npm.pkg.github.com" > .npmrc
+            echo "//npm.pkg.github.com/:_authToken=${{ secrets.PAT }}" >> .npmrc
+            VER=$(npm view "${{ inputs.package_name }}" version 2>/dev/null || echo "")
+            rm .npmrc
+            if [ -z "$VER" ]; then
+              echo "::error::Could not resolve latest version for ${{ inputs.package_name }}"
+              exit 1
+            fi
+            echo "version=^${VER}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "### Propagate ${{ inputs.package_name }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Create PRs in target repos
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+          PACKAGE: ${{ inputs.package_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SCOPE: ${{ inputs.npm_scope }}
+        run: |
+          IFS=',' read -ra REPOS <<< "${{ inputs.target_repos }}"
+          IFS=',' read -ra DIRS <<< "${{ inputs.working_directories }}"
+
+          BRANCH="chore/update-$(echo "$PACKAGE" | tr '/@' '-')-${VERSION//[^0-9.]/}"
+
+          RESULTS=()
+          for i in "${!REPOS[@]}"; do
+            REPO="${REPOS[$i]}"
+            DIR="${DIRS[$i]:-.}"
+            echo "--- $REPO (dir: $DIR) ---"
+
+            # Clone
+            TMPDIR=$(mktemp -d)
+            gh repo clone "$REPO" "$TMPDIR" -- --depth 1 2>&1 || { echo "::warning::Failed to clone $REPO"; continue; }
+            cd "$TMPDIR"
+
+            # Check if already up to date
+            CURRENT=$(node -e "try{const p=require('./${DIR}/package.json');console.log(p.dependencies?.['${PACKAGE}']||p.devDependencies?.['${PACKAGE}']||'')}catch{console.log('')}")
+            if [ "$CURRENT" = "$VERSION" ]; then
+              echo "Already at $VERSION, skipping"
+              RESULTS+=("$REPO: already up to date")
+              rm -rf "$TMPDIR"
+              continue
+            fi
+
+            # Create branch
+            git checkout -b "$BRANCH"
+
+            # Install
+            cd "$DIR"
+            echo "${SCOPE}:registry=https://npm.pkg.github.com" > .npmrc
+            echo "//npm.pkg.github.com/:_authToken=${GH_TOKEN}" >> .npmrc
+            npm install "${PACKAGE}@${VERSION}" 2>&1 | tail -3
+            rm .npmrc
+
+            # Check if anything changed
+            cd "$TMPDIR"
+            if [ -z "$(git status --porcelain)" ]; then
+              echo "No changes, skipping"
+              RESULTS+=("$REPO: no changes")
+              rm -rf "$TMPDIR"
+              continue
+            fi
+
+            # Commit & push
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "chore: update ${PACKAGE} to ${VERSION}"
+
+            git push origin "$BRANCH" 2>&1 || { echo "::warning::Failed to push to $REPO"; RESULTS+=("$REPO: push failed"); rm -rf "$TMPDIR"; continue; }
+
+            # Create PR
+            PR_URL=$(gh pr create --repo "$REPO" --base main --head "$BRANCH" \
+              --title "chore: update ${PACKAGE} to ${VERSION}" \
+              --body "Automated update from ${GITHUB_REPOSITORY} CI." 2>&1)
+            echo "$PR_URL"
+            RESULTS+=("$REPO: $PR_URL")
+
+            rm -rf "$TMPDIR"
+          done
+
+          # Summary
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Repo | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          for r in "${RESULTS[@]}"; do
+            echo "| ${r%%:*} | ${r#*: } |" >> "$GITHUB_STEP_SUMMARY"
+          done

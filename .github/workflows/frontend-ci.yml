@@ -87,9 +87,24 @@ on:
         description: 'Directory of npm package to publish (e.g. "packages/auth-client"). Empty = no publish.'
         type: string
         default: ''
+      npm_publish_name:
+        description: 'Full npm package name for propagation (e.g. "@ippoan/auth-client"). Required if propagate_repos is set.'
+        type: string
+        default: ''
+      npm_publish_propagate_repos:
+        description: 'Comma-separated repos to auto-update after publish (e.g. "ippoan/nuxt-notify,ippoan/alc-app"). Empty = no propagation.'
+        type: string
+        default: ''
+      npm_publish_propagate_dirs:
+        description: 'Comma-separated working directories per repo (e.g. ".,.,web"). Must match propagate_repos order.'
+        type: string
+        default: ''
     secrets:
       CLOUDFLARE_API_TOKEN:
         description: Cloudflare API token for wrangler deploy
+        required: false
+      PROPAGATE_PAT:
+        description: PAT with repo scope for cross-repo package propagation
         required: false
 
 jobs:
@@ -736,6 +751,23 @@ jobs:
           echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" >> .npmrc
           npm publish
           echo "### 📦 Published \`$(node -p "require('./package.json').name")@${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+
+  propagate:
+    name: Propagate Package
+    needs: [publish-release]
+    if: >-
+      always() &&
+      inputs.npm_publish_propagate_repos != '' &&
+      needs.publish-release.result == 'success'
+    uses: ippoan/ci-workflows/.github/workflows/propagate-package.yml@main
+    with:
+      package_name: ${{ inputs.npm_publish_name }}
+      package_version: ''
+      target_repos: ${{ inputs.npm_publish_propagate_repos }}
+      working_directories: ${{ inputs.npm_publish_propagate_dirs }}
+      npm_scope: ${{ inputs.npm_scope }}
+    secrets:
+      PAT: ${{ secrets.PROPAGATE_PAT }}
 
   auto-merge:
     name: Auto Merge
