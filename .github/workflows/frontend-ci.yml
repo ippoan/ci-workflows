@@ -186,11 +186,16 @@ jobs:
             ERRORS+=("No 'ci /' required status check found")
           fi
 
-          # Check: auto-merge enabled
+          # Check: auto-merge enabled + delete branch on merge
           REPO_INFO=$(curl -sf "https://api.github.com/repos/$REPO") || true
           AUTO_MERGE=$(echo "$REPO_INFO" | jq -r '.allow_auto_merge // false')
           if [ "$AUTO_MERGE" != "true" ]; then
             ERRORS+=("Auto-merge is not enabled (Settings > General > Allow auto-merge)")
+          fi
+
+          DELETE_BRANCH=$(echo "$REPO_INFO" | jq -r '.delete_branch_on_merge // false')
+          if [ "$DELETE_BRANCH" != "true" ]; then
+            ERRORS+=("Delete branch on merge is not enabled (Settings > General > Automatically delete head branches)")
           fi
 
           # Check: Ruleset exists with no bypass actors (admin bypass prevention)
