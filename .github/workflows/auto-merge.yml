@@ -2,6 +2,10 @@ name: Auto Merge
 
 on:
   workflow_call:
+    secrets:
+      AUTO_MERGE_PAT:
+        description: 'PAT for merge to trigger subsequent workflows (falls back to GITHUB_TOKEN)'
+        required: false
 
 jobs:
   auto-merge:
@@ -14,5 +18,5 @@ jobs:
     steps:
       - name: Squash merge
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || github.token }}
         run: gh pr merge ${{ github.event.number }} --squash --repo ${{ github.repository }} 2>&1 || true
