@@ -19,4 +19,4 @@ jobs:
       - name: Squash merge
         env:
           GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || github.token }}
-        run: gh pr merge ${{ github.event.number }} --squash --repo ${{ github.repository }} 2>&1 || true
+        run: gh pr merge ${{ github.event.number }} --squash --repo ${{ github.repository }}
