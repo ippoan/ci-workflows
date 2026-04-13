@@ -1,19 +1,20 @@
 name: PR Limit Check
-description: Fail if the PR author has other open PRs in this repo
+description: Fail if the PR author has conflicting open PRs in this repo
 
 runs:
   using: composite
   steps:
-    - name: Check open PRs by same author
+    - name: Check conflicting PRs by same author
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
         AUTHOR="${{ github.event.pull_request.user.login }}"
         THIS_PR="${{ github.event.pull_request.number }}"
-        COUNT=$(gh pr list --repo "${{ github.repository }}" --state open --author "$AUTHOR" --json number -q "[ .[] | select(.number != $THIS_PR) ] | length")
+        CONFLICTS=$(gh pr list --repo "${{ github.repository }}" --state open --author "$AUTHOR" --json number,title,mergeable -q "[ .[] | select(.number != $THIS_PR and .mergeable == \"CONFLICTING\") ]")
+        COUNT=$(echo "$CONFLICTS" | jq 'length')
         if [ "$COUNT" -gt 0 ]; then
-          echo "::error::$AUTHOR has $COUNT other open PR(s). Close or merge them before creating a new one."
-          gh pr list --repo "${{ github.repository }}" --state open --author "$AUTHOR" --json number,title -q ".[] | select(.number != $THIS_PR) | \"  #\\(.number) \\(.title)\""
+          echo "::error::$AUTHOR has $COUNT conflicting open PR(s). Resolve conflicts before creating a new one."
+          echo "$CONFLICTS" | jq -r '.[] | "  #\(.number) \(.title)"'
           exit 1
         fi
