@@ -16,7 +16,16 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Squash merge
+      - name: Check mergeable and squash merge
         env:
           GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || github.token }}
-        run: gh pr merge ${{ github.event.number }} --squash --repo ${{ github.repository }}
+        run: |
+          PR=${{ github.event.number }}
+          REPO=${{ github.repository }}
+          MERGEABLE=$(gh pr view "$PR" --repo "$REPO" --json mergeable --jq .mergeable)
+          echo "PR #$PR mergeable: $MERGEABLE"
+          if [ "$MERGEABLE" = "CONFLICTING" ]; then
+            echo "::error::PR #$PR has merge conflicts. Resolve conflicts before merging."
+            exit 1
+          fi
+          gh pr merge "$PR" --squash --repo "$REPO"
