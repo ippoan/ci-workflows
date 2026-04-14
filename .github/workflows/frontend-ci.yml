@@ -728,12 +728,15 @@ jobs:
 
   publish-release:
     name: Publish Release
-    needs: [deploy-release]
+    needs: [test, typecheck, integration-test, deploy-release]
     if: >-
       always() &&
       inputs.npm_publish_directory != '' &&
       startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push' &&
-      needs.deploy-release.result == 'success'
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      needs.typecheck.result == 'success' &&
+      (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
+      (needs.deploy-release.result == 'success' || needs.deploy-release.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
