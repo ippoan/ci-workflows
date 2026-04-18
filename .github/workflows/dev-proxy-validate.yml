@@ -1,0 +1,46 @@
+name: dev-proxy validate
+
+# Reusable workflow: validate the .ippoan-dev.yaml metadata file in a frontend
+# repo. Fetches ippoan/dev-proxy main to compare port assignments and catch
+# collisions before merge.
+#
+# Caller:
+#   jobs:
+#     dev-proxy:
+#       uses: ippoan/ci-workflows/.github/workflows/dev-proxy-validate.yml@main
+
+on:
+  workflow_call:
+    inputs:
+      spec_file:
+        description: Path to the metadata file
+        type: string
+        default: '.ippoan-dev.yaml'
+
+jobs:
+  validate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check spec file exists
+        run: |
+          if [ ! -f "${{ inputs.spec_file }}" ]; then
+            echo "::error::${{ inputs.spec_file }} is missing."
+            echo "Add a spec declaring this repo to dev-proxy. Example:"
+            echo ""
+            echo "  name: ${{ github.event.repository.name }}"
+            echo "  port: 30XX   # pick an unused port"
+            echo "  cmd: \"PORT=\\\$PORT HOST=0.0.0.0 npm run dev\""
+            exit 1
+          fi
+
+      - name: Validate against dev-proxy registry
+        run: |
+          curl -sfL \
+            https://raw.githubusercontent.com/ippoan/dev-proxy/main/scripts/validate-frontend.mjs \
+            -o /tmp/validate-frontend.mjs
+          node /tmp/validate-frontend.mjs \
+            "${{ inputs.spec_file }}" \
+            "${{ github.event.repository.name }}"
