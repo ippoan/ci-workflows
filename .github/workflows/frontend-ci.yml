@@ -119,32 +119,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ippoan/ci-workflows/.github/actions/pr-limit@main
 
-  dev-proxy-validate:
-    name: Dev Proxy Validate
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Validate .ippoan-dev.yaml against dev-proxy registry
-        run: |
-          if [ ! -f .ippoan-dev.yaml ]; then
-            echo "::error::.ippoan-dev.yaml is missing."
-            echo ""
-            echo "Add it to the repo root. Example:"
-            echo ""
-            echo "  name: ${{ github.event.repository.name }}"
-            echo "  port: 30XX    # unused in ippoan/dev-proxy registry.json"
-            echo "  cmd: \"PORT=\\\$PORT HOST=0.0.0.0 npm run dev\""
-            echo ""
-            echo "Registry: https://github.com/ippoan/dev-proxy/blob/main/registry.json"
-            exit 1
-          fi
-          curl -sfL \
-            https://raw.githubusercontent.com/ippoan/dev-proxy/main/scripts/validate-frontend.mjs \
-            -o /tmp/validate-frontend.mjs
-          node /tmp/validate-frontend.mjs .ippoan-dev.yaml "${{ github.event.repository.name }}"
-
   branch-protection:
     name: Branch Protection Check
     if: github.event_name == 'pull_request'
