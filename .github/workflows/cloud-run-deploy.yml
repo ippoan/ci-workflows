@@ -1,0 +1,144 @@
+name: Cloud Run Deploy
+
+# GHCR に push 済みの image を Cloud Run にデプロイする reusable。
+#
+# 解決する落とし穴:
+#  1. `gcloud run deploy` で traffic が latest 自動 shift しない → 明示的に
+#     `update-traffic --to-latest` を叩く
+#  2. AR (Artifact Registry) pull-through cache の `:latest` タグが stale な
+#     digest を指す問題 → tag ではなく digest (`@sha256:...`) で指定する
+#  3. `gcloud run services replace` は ghcr.io:// スキーム拒否 →
+#     AR remote-repo 経由の参照に統一
+#
+# 対象: daiun-salary, dtako-scraper など single-service の Cloud Run デプロイ。
+# rust-alc-api のようなマルチサービス + render.sh テンプレート化された
+# deploy は対象外 (独自 workflow 維持)。
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: 'Cloud Run service name (e.g. "daiun-salary")'
+        type: string
+        required: true
+      region:
+        description: 'GCP region'
+        type: string
+        default: asia-northeast1
+      project:
+        description: 'GCP project ID (e.g. "cloudsql-sv")'
+        type: string
+        required: true
+      ghcr_image:
+        description: 'GHCR image reference without tag (e.g. "ghcr.io/ippoan/daiun-salary")'
+        type: string
+        required: true
+      image_tag:
+        description: 'Image tag to deploy (e.g. "v0.1.2" or sha)'
+        type: string
+        required: true
+      ar_repo:
+        description: 'AR remote-repo reference matching ghcr_image (e.g. "asia-northeast1-docker.pkg.dev/cloudsql-sv/ghcr/ippoan/daiun-salary")'
+        type: string
+        required: true
+    secrets:
+      GCP_SA_KEY:
+        description: 'Service account key JSON with Cloud Run deploy + AR reader permissions'
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Resolve GHCR digest
+        id: digest
+        run: |
+          IMAGE="${{ inputs.ghcr_image }}:${{ inputs.image_tag }}"
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{.Manifest.Digest}}')
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "<no value>" ]; then
+            echo "::error::Failed to resolve digest for $IMAGE"
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Cloud Run Deploy"
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Service | \`${{ inputs.service }}\` |"
+            echo "| Region | \`${{ inputs.region }}\` |"
+            echo "| Tag | \`${{ inputs.image_tag }}\` |"
+            echo "| Digest | \`$DIGEST\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy image (digest-pinned)
+        run: |
+          AR_IMAGE="${{ inputs.ar_repo }}@${{ steps.digest.outputs.digest }}"
+          echo "Deploying $AR_IMAGE to ${{ inputs.service }}..."
+          gcloud run services update "${{ inputs.service }}" \
+            --region "${{ inputs.region }}" \
+            --project "${{ inputs.project }}" \
+            --image "$AR_IMAGE"
+
+      - name: Route 100% traffic to latest revision
+        run: |
+          gcloud run services update-traffic "${{ inputs.service }}" \
+            --region "${{ inputs.region }}" \
+            --project "${{ inputs.project }}" \
+            --to-latest
+
+      - name: Verify deployment
+        run: |
+          URL=$(gcloud run services describe "${{ inputs.service }}" \
+            --region "${{ inputs.region }}" --project "${{ inputs.project }}" \
+            --format 'value(status.url)')
+          LATEST_READY=$(gcloud run services describe "${{ inputs.service }}" \
+            --region "${{ inputs.region }}" --project "${{ inputs.project }}" \
+            --format 'value(status.latestReadyRevisionName)')
+          LATEST_CREATED=$(gcloud run services describe "${{ inputs.service }}" \
+            --region "${{ inputs.region }}" --project "${{ inputs.project }}" \
+            --format 'value(status.latestCreatedRevisionName)')
+          SERVING=$(gcloud run services describe "${{ inputs.service }}" \
+            --region "${{ inputs.region }}" --project "${{ inputs.project }}" \
+            --format 'value(status.traffic[0].revisionName)')
+          echo "- URL: $URL"
+          echo "- latestReady:   $LATEST_READY"
+          echo "- latestCreated: $LATEST_CREATED"
+          echo "- serving:       $SERVING"
+          {
+            echo ""
+            echo "| Item | Value |"
+            echo "|------|-------|"
+            echo "| URL | $URL |"
+            echo "| latestReady | \`$LATEST_READY\` |"
+            echo "| latestCreated | \`$LATEST_CREATED\` |"
+            echo "| serving | \`$SERVING\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$LATEST_READY" != "$LATEST_CREATED" ]; then
+            echo "::warning::latestReadyRevisionName != latestCreatedRevisionName (may still be transitioning)"
+          fi
+          if [ "$SERVING" != "$LATEST_READY" ]; then
+            echo "::error::Traffic not routed to latest ready revision"
+            exit 1
+          fi
+          echo "::notice ::${{ inputs.service }} deployed successfully at $URL"
