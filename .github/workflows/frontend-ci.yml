@@ -119,6 +119,55 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ippoan/ci-workflows/.github/actions/pr-limit@main
 
+  check-old-auth-domain:
+    name: Check old auth-worker domain
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail if auth.mtamaramu.com is hardcoded
+        shell: bash
+        run: |
+          # 旧 auth-worker ドメイン (auth.mtamaramu.com) のハードコード参照を検出する。
+          # 新ドメインは auth.ippoan.org。auth-worker URL は wrangler の env vars
+          # (NUXT_PUBLIC_AUTH_WORKER_URL) や config.public.authWorkerUrl 経由で
+          # 注入する想定。ハードコードしているとドメイン移行漏れになり、
+          # /admin/sso → /top や cross-app navigation で旧 worker に飛んで
+          # 認証が通らなくなる。
+          #
+          # 対象ファイル: ts / vue / js / mjs / toml / json / jsonc
+          # 除外: node_modules, .claude/worktrees, package-lock.json, lock files,
+          #       コメント中の説明 (許容したい場合は `// allow-old-auth-domain`
+          #       を行末に付けること)。
+          set -euo pipefail
+
+          MATCHES=$(grep -rEn "auth\.mtamaramu\.com" . \
+            --include="*.ts" --include="*.tsx" --include="*.vue" \
+            --include="*.js" --include="*.mjs" --include="*.cjs" \
+            --include="*.toml" --include="*.json" --include="*.jsonc" \
+            --exclude-dir=node_modules \
+            --exclude-dir=.claude \
+            --exclude-dir=.git \
+            --exclude-dir=dist \
+            --exclude-dir=.output \
+            --exclude-dir=.nuxt \
+            --exclude-dir=coverage \
+            --exclude="package-lock.json" \
+            --exclude="*.lock" \
+            2>/dev/null | grep -v "allow-old-auth-domain" || true)
+
+          if [ -n "$MATCHES" ]; then
+            echo "::error::Hardcoded auth.mtamaramu.com (old auth-worker URL) detected. Use auth.ippoan.org or read from runtime config (config.public.authWorkerUrl) / env var (NUXT_PUBLIC_AUTH_WORKER_URL)."
+            echo ""
+            echo "Matches:"
+            echo "$MATCHES"
+            echo ""
+            echo "If a reference is intentional (e.g. legacy redirect for an out-of-date bookmark), add a trailing '// allow-old-auth-domain' comment on that line to whitelist it."
+            exit 1
+          fi
+          echo "OK: no hardcoded auth.mtamaramu.com found."
+
   branch-protection:
     name: Branch Protection Check
     if: github.event_name == 'pull_request'
