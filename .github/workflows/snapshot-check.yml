@@ -1,0 +1,50 @@
+name: Snapshot Check
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: 'Node.js version'
+        type: string
+        default: '22'
+      working_directory:
+        description: 'Directory containing package.json + dev-plans.config.js'
+        type: string
+        default: '.'
+      install_command:
+        description: 'Dependency install command'
+        type: string
+        default: 'npm ci'
+      npm_scope:
+        description: 'npm scope for GitHub Packages registry'
+        type: string
+        default: '@ippoan'
+    secrets:
+      PAT:
+        description: 'PAT with read:packages + repo (Issues read) scope. Used for npm install + GitHub API calls in snapshot:check.'
+        required: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          registry-url: 'https://npm.pkg.github.com'
+          scope: ${{ inputs.npm_scope }}
+
+      - name: Install dependencies
+        run: ${{ inputs.install_command }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.PAT }}
+
+      - name: Run snapshot:check
+        run: npx --no-install dev-plans-snapshot check
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT }}

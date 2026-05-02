@@ -101,3 +101,28 @@ PR の required checks が全 pass すると**自動で squash merge** される
 - `wrangler.toml` / `wrangler.jsonc` に `account_id` が必要
 - cross-org では `secrets: inherit` が動かないため、明示的に secrets を渡す
 - `@ippoan/test-utils` パッケージで mock/live テストヘルパーを共有可能
+
+## `snapshot-check.yml`
+
+`ippoan/ippoan-dev-plans` で管理している plan Issue と consumer repo の `manifests/production.snapshot.json` の整合性を CI で検証する reusable workflow。
+
+```yaml
+jobs:
+  snapshot-check:
+    uses: ippoan/ci-workflows/.github/workflows/snapshot-check.yml@main
+    secrets:
+      PAT: ${{ secrets.GHCR_NPM_PAT }}  # read:packages + repo (Issues read)
+```
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `node_version` | `22` | Node.js version |
+| `working_directory` | `.` | `package.json` + `dev-plans.config.js` 配置先 |
+| `install_command` | `npm ci` | Install command |
+| `npm_scope` | `@ippoan` | npm scope for GitHub Packages registry |
+
+consumer repo に必要なもの:
+- `package.json` の devDependencies に `@ippoan/dev-plans-snapshot`
+- ルートに `.npmrc` (`@ippoan:registry=https://npm.pkg.github.com`)
+- ルートに `dev-plans.config.js` (`scopeLabels` / `grepPatterns` / `sourceDirs`)
+- `manifests/production.snapshot.json` (commit 済み)
