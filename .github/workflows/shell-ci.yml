@@ -1,0 +1,92 @@
+name: Shell CI
+
+# Reusable workflow for shell-script repos:
+#   1. shellcheck across the repo
+#   2. optional bash test runner (e.g. stdin-pipe hook tests)
+#
+# Usage (caller .github/workflows/test.yml):
+#
+#   name: test
+#   on: [push, pull_request]
+#   permissions:
+#     contents: read
+#     issues: read
+#   jobs:
+#     ci:
+#       uses: ippoan/ci-workflows/.github/workflows/shell-ci.yml@main
+#       with:
+#         test_script: tests/test-foo.sh        # optional, omit to skip test job
+#         test_needs_gh: true                   # set GH_TOKEN for gh CLI auth
+#         shellcheck_opts: "-e SC1091 -e SC2155"
+#         ignore_paths: "tests"                 # newline-separated for action-shellcheck
+
+on:
+  workflow_call:
+    inputs:
+      scandir:
+        description: 'Directory to scan for shell scripts'
+        type: string
+        default: '.'
+      severity:
+        description: 'shellcheck severity (error|warning|info|style)'
+        type: string
+        default: 'warning'
+      ignore_paths:
+        description: 'Paths to ignore (newline-separated). Forwarded to action-shellcheck.'
+        type: string
+        default: ''
+      ignore_names:
+        description: 'File names to ignore (newline-separated). Forwarded to action-shellcheck.'
+        type: string
+        default: ''
+      shellcheck_opts:
+        description: 'Extra shellcheck opts forwarded via SHELLCHECK_OPTS env (e.g. "-e SC2086 -e SC2034")'
+        type: string
+        default: ''
+      test_script:
+        description: 'Optional bash test runner path (repo-relative). If empty, the test job is skipped.'
+        type: string
+        default: ''
+      test_needs_gh:
+        description: 'If true, export GH_TOKEN=secrets.GITHUB_TOKEN before running test_script (for gh CLI auth).'
+        type: boolean
+        default: false
+      test_runs_on:
+        description: 'runner label for the test job'
+        type: string
+        default: 'ubuntu-latest'
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        uses: ludeeus/action-shellcheck@master
+        env:
+          SHELLCHECK_OPTS: ${{ inputs.shellcheck_opts }}
+        with:
+          severity: ${{ inputs.severity }}
+          scandir: ${{ inputs.scandir }}
+          ignore_paths: ${{ inputs.ignore_paths }}
+          ignore_names: ${{ inputs.ignore_names }}
+
+  test:
+    name: test (${{ inputs.test_script }})
+    if: ${{ inputs.test_script != '' }}
+    needs: shellcheck
+    runs-on: ${{ inputs.test_runs_on }}
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify gh + jq available
+        run: |
+          gh --version
+          jq --version
+      - name: Run test script
+        env:
+          GH_TOKEN: ${{ inputs.test_needs_gh && secrets.GITHUB_TOKEN || '' }}
+        run: bash "${{ inputs.test_script }}"

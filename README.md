@@ -126,3 +126,39 @@ consumer repo に必要なもの:
 - ルートに `.npmrc` (`@ippoan:registry=https://npm.pkg.github.com`)
 - ルートに `dev-plans.config.js` (`scopeLabels` / `grepPatterns` / `sourceDirs`)
 - `manifests/production.snapshot.json` (commit 済み)
+
+## `shell-ci.yml`
+
+Shell-script repo (例: `yhonda-ohishi/claude-hooks`) 向け reusable workflow。
+
+1. **shellcheck**: 全 `*.sh` を lint
+2. **test** (optional): 任意の bash テストランナーを実行 (stdin-pipe hook test 等)
+
+```yaml
+name: test
+on: [push, pull_request]
+permissions:
+  contents: read
+  issues: read
+jobs:
+  ci:
+    uses: ippoan/ci-workflows/.github/workflows/shell-ci.yml@main
+    with:
+      test_script: tests/test-foo.sh        # optional, omit to skip test job
+      test_needs_gh: true                   # gh CLI を使うテストの場合
+      shellcheck_opts: "-e SC1091 -e SC2155"
+      ignore_paths: "tests"                 # newline-separated
+```
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `scandir` | `.` | shellcheck 走査 root |
+| `severity` | `warning` | shellcheck severity (error\|warning\|info\|style) |
+| `ignore_paths` | `''` | 無視 path (newline-separated) |
+| `ignore_names` | `''` | 無視 file 名 (newline-separated) |
+| `shellcheck_opts` | `''` | `SHELLCHECK_OPTS` env (例: `-e SC2086`) |
+| `test_script` | `''` | repo-relative テストランナー。空なら test job を skip |
+| `test_needs_gh` | `false` | true で `GH_TOKEN=${{ secrets.GITHUB_TOKEN }}` を export |
+| `test_runs_on` | `ubuntu-latest` | test job の runner label |
+
+`secrets: inherit` は不要 (`GITHUB_TOKEN` は workflow_call で permissions block 経由)。
