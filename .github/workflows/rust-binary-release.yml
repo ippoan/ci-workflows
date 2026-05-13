@@ -32,6 +32,13 @@ name: Rust Binary Release
 #   archive (required): "tar.gz" or "zip"
 #   ext     (optional): binary 拡張子 (windows は ".exe")
 #   cross   (optional): aarch64-unknown-linux-gnu 等 cross compile が必要なら true
+#
+# Optional secrets:
+#   MCP_INTERNAL_SECRET  — build 時に env として cargo build に注入される。
+#     caller の build.rs が `std::env::var("MCP_INTERNAL_SECRET")` を読み、
+#     `cargo:rustc-env` で release binary に embed する用途。
+#     渡さない場合は空文字列扱い (= consuming binary 側で dev fallback に落ちる)。
+#     初出: github-mcp-server-rs#25 (auth-worker introspect secret embed)。
 
 on:
   workflow_call:
@@ -60,6 +67,10 @@ on:
         required: false
         type: boolean
         default: false
+    secrets:
+      MCP_INTERNAL_SECRET:
+        description: "Optional. Embedded into the release binary at build time via env. See github-mcp-server-rs#25."
+        required: false
 
 permissions:
   contents: write
@@ -109,6 +120,11 @@ jobs:
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
+          # Optional build-time embed (github-mcp-server-rs#25)。caller が
+          # secrets を渡さなければ空文字列。consuming build.rs 側で
+          # `std::env::var("MCP_INTERNAL_SECRET").unwrap_or_default()` し、
+          # 空なら下流 resolver が dev fallback に落ちる安全設計。
+          MCP_INTERNAL_SECRET: ${{ secrets.MCP_INTERNAL_SECRET }}
         run: cargo build --release --locked --target ${{ matrix.t.target }}
 
       - name: sccache stats
