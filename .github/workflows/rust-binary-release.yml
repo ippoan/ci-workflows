@@ -78,6 +78,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # sccache: rustc 成果物を GHA backend (actions/cache) に保存。
+  # tag push でも cache が効くように env と save-if を整備する。
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  CARGO_INCREMENTAL: "0"  # sccache 利用時は incremental hash が不安定なので切る
 
 jobs:
   build:
@@ -102,8 +107,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ inputs.bin_name }}
+          # multi-target caller でも衝突しないよう target を key に含める
+          shared-key: ${{ inputs.bin_name }}-${{ matrix.t.target }}
           cache-targets: false
+          cache-on-failure: true
+          # default-branch push に加え tag push でも save する
+          # (default の save-if だと tag run は default branch 判定にならず、これまで一度も save されなかった)
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Install cross toolchain (aarch64-linux only)
         if: matrix.t.cross == true && runner.os == 'Linux'
@@ -128,6 +138,7 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.t.target }}
 
       - name: sccache stats
+        if: always()
         run: sccache --show-stats
 
       - name: Strip (unix native only)
