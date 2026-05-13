@@ -3,7 +3,7 @@ name: Rust Binary Release
 # Reusable workflow: tag push (v*) 起点で `cargo build --release` を回し、
 # GitHub Release ページに各 target のアーカイブを attach する。
 #
-# Caller example:
+# Caller example (linux のみ):
 #   on:
 #     push:
 #       tags: ["v*"]
@@ -15,10 +15,23 @@ name: Rust Binary Release
 #       permissions:
 #         contents: write
 #
-# 複数 target にしたい時:
+# 複数 OS:
 #   with:
 #     bin_name: foo
-#     targets: '["x86_64-unknown-linux-gnu","x86_64-apple-darwin","aarch64-apple-darwin"]'
+#     targets: |
+#       [
+#         {"target":"x86_64-unknown-linux-gnu","os":"ubuntu-latest","archive":"tar.gz"},
+#         {"target":"x86_64-apple-darwin","os":"macos-latest","archive":"tar.gz"},
+#         {"target":"aarch64-apple-darwin","os":"macos-latest","archive":"tar.gz"},
+#         {"target":"x86_64-pc-windows-msvc","os":"windows-latest","archive":"zip","ext":".exe"}
+#       ]
+#
+# target object フィールド:
+#   target  (required): cargo target triple
+#   os      (required): runner OS
+#   archive (required): "tar.gz" or "zip"
+#   ext     (optional): binary 拡張子 (windows は ".exe")
+#   cross   (optional): aarch64-unknown-linux-gnu 等 cross compile が必要なら true
 
 on:
   workflow_call:
@@ -28,10 +41,10 @@ on:
         required: true
         type: string
       targets:
-        description: "JSON array of cargo target triples"
+        description: "JSON array of target objects {target, os, archive, ext?, cross?}"
         required: false
         type: string
-        default: '["x86_64-unknown-linux-gnu"]'
+        default: '[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-latest","archive":"tar.gz"}]'
       release_body:
         description: "Optional body for the GitHub Release (markdown)"
         required: false
@@ -57,43 +70,25 @@ env:
 
 jobs:
   build:
-    name: build ${{ matrix.target }}
+    name: build ${{ matrix.t.target }}
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJSON(inputs.targets) }}
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
-            cross: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
-            ext: .exe
-    runs-on: ${{ matrix.os }}
+        t: ${{ fromJSON(inputs.targets) }}
+    runs-on: ${{ matrix.t.os }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.t.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.t.target }}
 
       - name: Install cross toolchain (aarch64-linux only)
-        if: matrix.cross == true && runner.os == 'Linux'
+        if: matrix.t.cross == true && runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
@@ -104,40 +99,40 @@ jobs:
           } >> .cargo/config.toml
 
       - name: cargo build --release
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.t.target }}
 
-      - name: Strip (unix)
-        if: runner.os != 'Windows' && matrix.cross != true
+      - name: Strip (unix native only)
+        if: runner.os != 'Windows' && matrix.t.cross != true
         run: |
-          strip "target/${{ matrix.target }}/release/${{ inputs.bin_name }}" || true
+          strip "target/${{ matrix.t.target }}/release/${{ inputs.bin_name }}" || true
 
-      - name: Compute tag + artifact name
+      - name: Compute artifact name
         id: meta
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
-          ARCHIVE_NAME="${{ inputs.bin_name }}-${TAG}-${{ matrix.target }}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          ARCHIVE_NAME="${{ inputs.bin_name }}-${TAG}-${{ matrix.t.target }}"
           echo "archive_base=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Package (tar.gz, unix)
-        if: matrix.archive == 'tar.gz'
+      - name: Package (tar.gz)
+        if: matrix.t.archive == 'tar.gz'
         shell: bash
         run: |
           STAGE="${{ steps.meta.outputs.archive_base }}"
           mkdir -p "dist/${STAGE}"
-          cp "target/${{ matrix.target }}/release/${{ inputs.bin_name }}${{ matrix.ext }}" "dist/${STAGE}/"
-          cp README.md LICENSE 2>/dev/null "dist/${STAGE}/" || true
+          cp "target/${{ matrix.t.target }}/release/${{ inputs.bin_name }}${{ matrix.t.ext }}" "dist/${STAGE}/"
+          [ -f README.md ] && cp README.md "dist/${STAGE}/" || true
+          [ -f LICENSE ]   && cp LICENSE   "dist/${STAGE}/" || true
           tar -czf "dist/${STAGE}.tar.gz" -C dist "${STAGE}"
           (cd dist && shasum -a 256 "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256")
 
       - name: Package (zip, windows)
-        if: matrix.archive == 'zip'
+        if: matrix.t.archive == 'zip'
         shell: pwsh
         run: |
           $stage = "${{ steps.meta.outputs.archive_base }}"
           New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/${{ inputs.bin_name }}${{ matrix.ext }}" "dist/$stage/"
+          Copy-Item "target/${{ matrix.t.target }}/release/${{ inputs.bin_name }}${{ matrix.t.ext }}" "dist/$stage/"
           if (Test-Path "README.md") { Copy-Item "README.md" "dist/$stage/" }
           if (Test-Path "LICENSE")   { Copy-Item "LICENSE"   "dist/$stage/" }
           Compress-Archive -Path "dist/$stage/*" -DestinationPath "dist/$stage.zip"
