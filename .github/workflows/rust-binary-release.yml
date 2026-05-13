@@ -1,0 +1,198 @@
+name: Rust Binary Release
+
+# Reusable workflow: tag push (v*) 起点で `cargo build --release` を回し、
+# GitHub Release ページに各 target のアーカイブを attach する。
+#
+# Caller example:
+#   on:
+#     push:
+#       tags: ["v*"]
+#   jobs:
+#     release:
+#       uses: ippoan/ci-workflows/.github/workflows/rust-binary-release.yml@main
+#       with:
+#         bin_name: github-mcp-server-rs
+#       permissions:
+#         contents: write
+#
+# 複数 target にしたい時:
+#   with:
+#     bin_name: foo
+#     targets: '["x86_64-unknown-linux-gnu","x86_64-apple-darwin","aarch64-apple-darwin"]'
+
+on:
+  workflow_call:
+    inputs:
+      bin_name:
+        description: "Binary name (must match Cargo.toml [[bin]] name)"
+        required: true
+        type: string
+      targets:
+        description: "JSON array of cargo target triples"
+        required: false
+        type: string
+        default: '["x86_64-unknown-linux-gnu"]'
+      release_body:
+        description: "Optional body for the GitHub Release (markdown)"
+        required: false
+        type: string
+        default: ""
+      draft:
+        description: "Create as draft release"
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: "Mark as prerelease (auto true for tags containing -)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(inputs.targets) }}
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            ext: .exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cross toolchain (aarch64-linux only)
+        if: matrix.cross == true && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          {
+            echo '[target.aarch64-unknown-linux-gnu]'
+            echo 'linker = "aarch64-linux-gnu-gcc"'
+          } >> .cargo/config.toml
+
+      - name: cargo build --release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Strip (unix)
+        if: runner.os != 'Windows' && matrix.cross != true
+        run: |
+          strip "target/${{ matrix.target }}/release/${{ inputs.bin_name }}" || true
+
+      - name: Compute tag + artifact name
+        id: meta
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ARCHIVE_NAME="${{ inputs.bin_name }}-${TAG}-${{ matrix.target }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "archive_base=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Package (tar.gz, unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          STAGE="${{ steps.meta.outputs.archive_base }}"
+          mkdir -p "dist/${STAGE}"
+          cp "target/${{ matrix.target }}/release/${{ inputs.bin_name }}${{ matrix.ext }}" "dist/${STAGE}/"
+          cp README.md LICENSE 2>/dev/null "dist/${STAGE}/" || true
+          tar -czf "dist/${STAGE}.tar.gz" -C dist "${STAGE}"
+          (cd dist && shasum -a 256 "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256")
+
+      - name: Package (zip, windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $stage = "${{ steps.meta.outputs.archive_base }}"
+          New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ inputs.bin_name }}${{ matrix.ext }}" "dist/$stage/"
+          if (Test-Path "README.md") { Copy-Item "README.md" "dist/$stage/" }
+          if (Test-Path "LICENSE")   { Copy-Item "LICENSE"   "dist/$stage/" }
+          Compress-Archive -Path "dist/$stage/*" -DestinationPath "dist/$stage.zip"
+          $hash = (Get-FileHash "dist/$stage.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $stage.zip" | Out-File -Encoding ascii "dist/$stage.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.archive_base }}
+          path: |
+            dist/${{ steps.meta.outputs.archive_base }}.tar.gz
+            dist/${{ steps.meta.outputs.archive_base }}.tar.gz.sha256
+            dist/${{ steps.meta.outputs.archive_base }}.zip
+            dist/${{ steps.meta.outputs.archive_base }}.zip.sha256
+          if-no-files-found: ignore
+          retention-days: 7
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List staged assets
+        run: ls -la dist/
+
+      - name: Detect prerelease (tag contains -)
+        id: detect
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=${{ inputs.prerelease }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release with assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: ${{ inputs.release_body }}
+          generate_release_notes: true
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ steps.detect.outputs.prerelease == 'true' }}
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+          fail_on_unmatched_files: true
