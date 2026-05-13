@@ -83,9 +83,16 @@ jobs:
         with:
           targets: ${{ matrix.t.target }}
 
+      # cache 戦略 (skill: ci-cache-patterns):
+      #   - sccache: rustc コンパイル成果物 (チェックサム判定、main cache の本命)
+      #   - Swatinem/rust-cache: ~/.cargo/registry + ~/.cargo/git の補助
+      #     `cache-targets: false` で target/ は sccache に任せて重複回避
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.t.target }}
+          shared-key: ${{ inputs.bin_name }}
+          cache-targets: false
 
       - name: Install cross toolchain (aarch64-linux only)
         if: matrix.t.cross == true && runner.os == 'Linux'
@@ -99,7 +106,13 @@ jobs:
           } >> .cargo/config.toml
 
       - name: cargo build --release
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
         run: cargo build --release --locked --target ${{ matrix.t.target }}
+
+      - name: sccache stats
+        run: sccache --show-stats
 
       - name: Strip (unix native only)
         if: runner.os != 'Windows' && matrix.t.cross != true
@@ -190,4 +203,6 @@ jobs:
             dist/*.tar.gz.sha256
             dist/*.zip
             dist/*.zip.sha256
-          fail_on_unmatched_files: true
+          # caller が linux のみ build した時に zip pattern が match しない
+          # ケースを許容 (build した分だけ attach されれば OK)。
+          fail_on_unmatched_files: false
