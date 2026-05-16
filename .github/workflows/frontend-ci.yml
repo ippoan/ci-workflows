@@ -110,7 +110,7 @@ on:
 jobs:
   pr-limit:
     name: PR Limit Check
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -121,7 +121,7 @@ jobs:
 
   check-old-auth-domain:
     name: Check old auth-worker domain
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -170,7 +170,7 @@ jobs:
 
   branch-protection:
     name: Branch Protection Check
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - name: Verify branch protection
@@ -281,6 +281,7 @@ jobs:
     needs: [pr-limit]
     if: >-
       always() &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
       inputs.has_tests &&
       (needs.pr-limit.result == 'success' || needs.pr-limit.result == 'skipped')
     runs-on: ubuntu-latest
@@ -492,6 +493,7 @@ jobs:
     needs: [pr-limit]
     if: >-
       always() &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
       (needs.pr-limit.result == 'success' || needs.pr-limit.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
@@ -547,6 +549,7 @@ jobs:
     needs: [pr-limit]
     if: >-
       always() &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
       inputs.has_integration &&
       (needs.pr-limit.result == 'success' || needs.pr-limit.result == 'skipped')
     runs-on: ubuntu-latest
@@ -627,6 +630,7 @@ jobs:
       inputs.has_deploy &&
       inputs.has_staging_deploy &&
       github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success' &&
       (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
@@ -750,6 +754,7 @@ jobs:
       always() &&
       inputs.npm_publish_directory != '' &&
       github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success'
     runs-on: ubuntu-latest
@@ -832,6 +837,7 @@ jobs:
     if: >-
       always() &&
       github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success' &&
       (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
