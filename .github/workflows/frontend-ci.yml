@@ -627,6 +627,7 @@ jobs:
       inputs.has_deploy &&
       inputs.has_staging_deploy &&
       github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success' &&
       (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
@@ -750,6 +751,7 @@ jobs:
       always() &&
       inputs.npm_publish_directory != '' &&
       github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success'
     runs-on: ubuntu-latest
@@ -832,6 +834,7 @@ jobs:
     if: >-
       always() &&
       github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success' &&
       (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
