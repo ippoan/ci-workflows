@@ -1,0 +1,164 @@
+name: Rust CI
+
+# Reusable CI pipeline for Rust binary crates in the ippoan org.
+# rustfmt / clippy / cargo test / cargo build --release + artifact upload を 1 本にまとめる。
+# sccache + Swatinem/rust-cache を `shared_key` で共有し、release.yml (rust-binary-release)
+# と cache を共用できる。
+#
+# Caller 例: ippoan/github-mcp-server-rs/.github/workflows/ci.yml
+#
+# build 時に環境変数として注入したい secret がある場合は `build_secret_env_name` を指定し、
+# caller 側で `secrets.BUILD_SECRET` (= 注入したい secret 値) を渡す:
+#
+#   jobs:
+#     ci:
+#       uses: ippoan/ci-workflows/.github/workflows/rust-ci.yml@main
+#       with:
+#         binary_name: github-mcp-server-rs
+#         shared_key: github-mcp-server-rs
+#         build_secret_env_name: MCP_INTERNAL_SECRET
+#       secrets:
+#         BUILD_SECRET: ${{ secrets.MCP_INTERNAL_SECRET }}
+
+on:
+  workflow_call:
+    inputs:
+      binary_name:
+        description: 'Binary name produced by `cargo build --release` (used for `--help` smoke test and artifact prefix).'
+        required: true
+        type: string
+      shared_key:
+        description: 'Swatinem/rust-cache shared-key. デフォルトは repository name。release.yml と同じ key にして cache を共用する。'
+        required: false
+        type: string
+        default: ''
+      build_secret_env_name:
+        description: 'Optional env var name to expose `secrets.BUILD_SECRET` as during `cargo build --release` (e.g. `MCP_INTERNAL_SECRET`).'
+        required: false
+        type: string
+        default: ''
+      extra_smoke_test:
+        description: 'Optional bash script run after `--help` smoke test. Only executed on push to main (fork PR では secret 不可視のため誤検知を避ける目的)。'
+        required: false
+        type: string
+        default: ''
+      upload_artifact:
+        description: 'release binary を GitHub Actions artifact として upload するか。'
+        required: false
+        type: boolean
+        default: true
+      artifact_retention_days:
+        description: 'Artifact retention days.'
+        required: false
+        type: number
+        default: 14
+      cargo_test_args:
+        description: 'Extra args appended to `cargo test`.'
+        required: false
+        type: string
+        default: '--all-features --no-fail-fast'
+      cargo_clippy_args:
+        description: 'Extra args appended to `cargo clippy`.'
+        required: false
+        type: string
+        default: '--all-targets --all-features -- -D warnings'
+      cargo_build_args:
+        description: 'Extra args appended to `cargo build --release`.'
+        required: false
+        type: string
+        default: '--locked'
+    secrets:
+      BUILD_SECRET:
+        description: 'Optional secret value injected into `cargo build --release` env under `build_secret_env_name`.'
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ inputs.shared_key != '' && inputs.shared_key || github.event.repository.name }}
+          cache-targets: false
+      - run: cargo clippy ${{ inputs.cargo_clippy_args }}
+      - run: sccache --show-stats
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ inputs.shared_key != '' && inputs.shared_key || github.event.repository.name }}
+          cache-targets: false
+      - run: cargo test ${{ inputs.cargo_test_args }}
+      - run: sccache --show-stats
+
+  build:
+    name: cargo build --release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ inputs.shared_key != '' && inputs.shared_key || github.event.repository.name }}
+          cache-targets: false
+      - name: cargo build --release
+        env:
+          BUILD_SECRET: ${{ secrets.BUILD_SECRET }}
+          BUILD_SECRET_ENV_NAME: ${{ inputs.build_secret_env_name }}
+          CARGO_BUILD_ARGS: ${{ inputs.cargo_build_args }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BUILD_SECRET_ENV_NAME" ]; then
+            # 動的 env 名で BUILD_SECRET を expose
+            export "$BUILD_SECRET_ENV_NAME=$BUILD_SECRET"
+          fi
+          # shellcheck disable=SC2086
+          cargo build --release $CARGO_BUILD_ARGS
+      - run: sccache --show-stats
+      - name: Smoke test (CLI --help)
+        env:
+          BINARY: ${{ inputs.binary_name }}
+        run: ./target/release/"$BINARY" --help
+      - name: Extra smoke test
+        if: inputs.extra_smoke_test != '' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          BINARY: ${{ inputs.binary_name }}
+        run: |
+          set -euo pipefail
+          ${{ inputs.extra_smoke_test }}
+      - uses: actions/upload-artifact@v4
+        if: inputs.upload_artifact
+        with:
+          name: ${{ inputs.binary_name }}-linux-x86_64
+          path: target/release/${{ inputs.binary_name }}
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact_retention_days }}
