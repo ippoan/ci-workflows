@@ -1,0 +1,146 @@
+name: Branch Protection
+
+# Reusable workflow that self-applies branch protection to a configurable
+# branch via the GitHub Branches API. Generalised from the original
+# yhonda-ohishi/claude-hooks `branch-protection.yml` so every consumer repo
+# can describe its protection policy declaratively in a thin caller and stay
+# in sync with policy changes that land here.
+#
+# Typical caller (drops into a repo's `.github/workflows/branch-protection.yml`):
+#
+#   name: branch-protection
+#   on:
+#     workflow_dispatch:
+#     push:
+#       branches: [main]
+#   permissions:
+#     contents: read
+#     administration: write
+#   jobs:
+#     apply:
+#       uses: ippoan/ci-workflows/.github/workflows/branch-protection.yml@main
+#       with:
+#         branch: main
+#         required_checks: |
+#           ci / rustfmt
+#           ci / clippy
+#           ci / cargo test
+#           ci / cargo build --release
+#       permissions:
+#         contents: read
+#         administration: write
+#
+# Notes on permissions: `administration: write` is required on the caller
+# job — GitHub forwards caller `permissions` to the reusable, and the
+# Branches API endpoint refuses a token without it. The caller cannot
+# inherit org-level admin from a PAT here unless it passes one as a secret.
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        description: 'Branch to protect (e.g. main, master)'
+        type: string
+        required: true
+      required_checks:
+        description: |
+          Newline-separated required status check contexts.
+          Example:
+            ci / rustfmt
+            ci / clippy
+          Pass an empty string to require no status checks (still enforces
+          force-push / deletion / conversation-resolution gates).
+        type: string
+        required: false
+        default: ''
+      strict_required_checks:
+        description: 'Require branches to be up to date before merging'
+        type: boolean
+        required: false
+        default: true
+      enforce_admins:
+        description: 'Also enforce protection for admins (set false to let admins bypass)'
+        type: boolean
+        required: false
+        default: false
+      required_conversation_resolution:
+        description: 'Block merge until all review threads are resolved'
+        type: boolean
+        required: false
+        default: true
+      allow_force_pushes:
+        description: 'Allow force pushes to the protected branch'
+        type: boolean
+        required: false
+        default: false
+      allow_deletions:
+        description: 'Allow the protected branch to be deleted'
+        type: boolean
+        required: false
+        default: false
+      required_linear_history:
+        description: 'Require linear history (no merge commits)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  administration: write
+
+jobs:
+  apply:
+    name: Apply branch protection
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      administration: write
+    steps:
+      - name: Apply branch protection on ${{ inputs.branch }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ inputs.branch }}
+          REQUIRED_CHECKS: ${{ inputs.required_checks }}
+          STRICT: ${{ inputs.strict_required_checks }}
+          ENFORCE_ADMINS: ${{ inputs.enforce_admins }}
+          REQ_CONVO: ${{ inputs.required_conversation_resolution }}
+          ALLOW_FORCE: ${{ inputs.allow_force_pushes }}
+          ALLOW_DELETE: ${{ inputs.allow_deletions }}
+          LINEAR: ${{ inputs.required_linear_history }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+
+          # Build the required_status_checks block dynamically. The Branches
+          # API rejects an empty contexts[] array, so when the caller passes
+          # no checks we omit the entire block by sending an explicit null.
+          ARGS=()
+          if [ -n "${REQUIRED_CHECKS// /}" ]; then
+            ARGS+=( -F "required_status_checks[strict]=${STRICT}" )
+            while IFS= read -r line; do
+              line="${line#"${line%%[![:space:]]*}"}"
+              line="${line%"${line##*[![:space:]]}"}"
+              [ -z "$line" ] && continue
+              ARGS+=( -F "required_status_checks[contexts][]=${line}" )
+            done <<< "${REQUIRED_CHECKS}"
+          else
+            ARGS+=( -f "required_status_checks=" )
+          fi
+
+          ARGS+=(
+            -F "enforce_admins=${ENFORCE_ADMINS}"
+            -f "required_pull_request_reviews="
+            -f "restrictions="
+            -F "required_linear_history=${LINEAR}"
+            -F "allow_force_pushes=${ALLOW_FORCE}"
+            -F "allow_deletions=${ALLOW_DELETE}"
+            -F "required_conversation_resolution=${REQ_CONVO}"
+          )
+
+          echo "Applying branch protection to $REPO@$BRANCH"
+          gh api -X PUT \
+            "repos/$REPO/branches/$BRANCH/protection" \
+            -H "Accept: application/vnd.github+json" \
+            "${ARGS[@]}"
+
+          echo "::notice::Branch protection applied on $REPO@$BRANCH"
