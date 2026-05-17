@@ -36,6 +36,12 @@ name: Branch Protection
 # inherit org-level admin from a PAT here unless it passes one as a secret.
 
 on:
+  # workflow_dispatch is also exposed so the file does not generate a
+  # phantom "no jobs / failure" run when committed/pushed. With
+  # workflow_call alone, GitHub registers a run entry on every commit that
+  # touches the file but cannot match a triggering event, and the entry
+  # ends as "failure" with 0 jobs — confusing but harmless. Mirroring the
+  # inputs here makes the file ad-hoc-runnable from the Actions UI too.
   workflow_call:
     inputs:
       branch:
@@ -62,7 +68,48 @@ on:
         description: 'Also enforce protection for admins (set false to let admins bypass)'
         type: boolean
         required: false
+        default: true
+      required_conversation_resolution:
+        description: 'Block merge until all review threads are resolved'
+        type: boolean
+        required: false
+        default: true
+      allow_force_pushes:
+        description: 'Allow force pushes to the protected branch'
+        type: boolean
+        required: false
         default: false
+      allow_deletions:
+        description: 'Allow the protected branch to be deleted'
+        type: boolean
+        required: false
+        default: false
+      required_linear_history:
+        description: 'Require linear history (no merge commits)'
+        type: boolean
+        required: false
+        default: false
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to protect (e.g. main, master)'
+        type: string
+        required: true
+      required_checks:
+        description: 'Newline-separated required status check contexts (empty for none)'
+        type: string
+        required: false
+        default: ''
+      strict_required_checks:
+        description: 'Require branches to be up to date before merging'
+        type: boolean
+        required: false
+        default: true
+      enforce_admins:
+        description: 'Also enforce protection for admins'
+        type: boolean
+        required: false
+        default: true
       required_conversation_resolution:
         description: 'Block merge until all review threads are resolved'
         type: boolean
