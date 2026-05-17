@@ -62,7 +62,7 @@ on:
         description: 'Also enforce protection for admins (set false to let admins bypass)'
         type: boolean
         required: false
-        default: false
+        default: true
       required_conversation_resolution:
         description: 'Block merge until all review threads are resolved'
         type: boolean
