@@ -1,0 +1,304 @@
+name: Branch Protection Drift Check
+
+# Reusable workflow that detects drift between a repo's declared
+# branch-protection spec (.github/branch-protection.yml) and the actual
+# check-runs produced by CI on the target ref.
+#
+# Why this exists: required_checks in a GitHub branch protection rule are
+# strings. When CI job names change (e.g. cc-relay PR #62 moved ci.yml to a
+# reusable workflow and the job name went from "ci / rustfmt" to
+# "ci / ci / rustfmt"), the rule keeps referencing the old phantom names and
+# silently blocks every PR from merging until someone notices. This check
+# turns that into a loud CI failure on PR + push to main, with a Job Summary
+# table pinpointing which spec entries no longer have a matching real check.
+#
+# Spec file format (YAML, default location .github/branch-protection.yml):
+#
+#   branch: main
+#   required_checks:
+#     - "ci / ci / rustfmt"
+#     - "ci / ci / clippy"
+#     - "ci / ci / cargo test"
+#     - "ci / ci / cargo build --release"
+#
+# Typical caller (drops into a repo's .github/workflows/branch-protection-drift.yml):
+#
+#   name: branch-protection-drift
+#   on:
+#     pull_request:
+#       branches: [main]
+#       paths:
+#         - '.github/branch-protection.yml'
+#         - '.github/workflows/**'
+#     push:
+#       branches: [main]
+#     schedule:
+#       - cron: '17 9 * * 1'  # weekly Monday sanity check
+#   jobs:
+#     drift:
+#       uses: ippoan/ci-workflows/.github/workflows/branch-protection-drift-check.yml@main
+#       permissions:
+#         contents: read
+#         checks: read
+
+on:
+  workflow_call:
+    inputs:
+      spec_path:
+        description: 'Path to the branch protection spec YAML in the caller repo.'
+        type: string
+        required: false
+        default: '.github/branch-protection.yml'
+      head_ref:
+        description: |
+          Git ref whose check-runs are used as the source of truth
+          for "what CI actually produces today". Default: main.
+        type: string
+        required: false
+        default: 'main'
+      fail_on_extra:
+        description: |
+          When true, extra checks produced by CI but not declared in the
+          spec also fail the job (default: just warn). Useful for repos
+          that want the spec to be the single source of truth for
+          required checks and intentionally exclude optional ones.
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  checks: read
+
+jobs:
+  drift-check:
+    name: Branch protection drift check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+
+      - name: Install PyYAML
+        # PyYAML is the only non-stdlib dependency. pip on ubuntu-latest
+        # is fast (cached wheels), no need to set up a venv or pin a
+        # specific Python version.
+        run: pip install --quiet --user pyyaml
+
+      - name: Compare spec to actual check-runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPEC_PATH: ${{ inputs.spec_path }}
+          HEAD_REF: ${{ inputs.head_ref }}
+          FAIL_ON_EXTRA: ${{ inputs.fail_on_extra }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          spec_path = Path(os.environ["SPEC_PATH"])
+          head_ref = os.environ["HEAD_REF"]
+          repo = os.environ["REPO"]
+          fail_on_extra = os.environ.get("FAIL_ON_EXTRA", "false").lower() == "true"
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          def emit(line=""):
+              print(line)
+              if summary_path:
+                  with open(summary_path, "a") as fh:
+                      fh.write(line + "\n")
+
+          if not spec_path.exists():
+              print(f"::error file={spec_path}::spec file not found", file=sys.stderr)
+              emit(f"# Branch Protection Drift Check")
+              emit("")
+              emit(f"❌ Spec file `{spec_path}` not found in caller repo.")
+              emit("")
+              emit("Create one with:")
+              emit("")
+              emit("```yaml")
+              emit("# .github/branch-protection.yml")
+              emit("branch: main")
+              emit("required_checks:")
+              emit('  - "ci / ci / rustfmt"')
+              emit('  - "ci / ci / clippy"')
+              emit("```")
+              sys.exit(1)
+
+          with spec_path.open() as fh:
+              spec = yaml.safe_load(fh) or {}
+
+          required = set()
+          raw_required = spec.get("required_checks") or []
+          if not isinstance(raw_required, list):
+              print(
+                  f"::error file={spec_path}::required_checks must be a list, got {type(raw_required).__name__}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          for entry in raw_required:
+              if not isinstance(entry, str):
+                  print(
+                      f"::error file={spec_path}::required_checks entries must be strings, got {entry!r}",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+              normalised = entry.strip()
+              if normalised:
+                  required.add(normalised)
+
+          branch_in_spec = spec.get("branch")
+
+          # Fetch check-runs for the head commit on the target ref.
+          # `--paginate` walks all pages; check-runs may exceed the default 30.
+          result = subprocess.run(
+              [
+                  "gh",
+                  "api",
+                  "--paginate",
+                  f"repos/{repo}/commits/{head_ref}/check-runs",
+                  "--jq",
+                  '.check_runs[] | {name: .name, status: .status, conclusion: .conclusion}',
+              ],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+          actual_runs = []
+          for line in result.stdout.splitlines():
+              line = line.strip()
+              if not line:
+                  continue
+              actual_runs.append(json.loads(line))
+
+          # Build the set of names that actually completed successfully on the
+          # ref. "Required" branch protection only honors checks that reported
+          # success, so in-progress / failed runs would not satisfy the rule
+          # either — align the comparison with how GitHub enforces it.
+          actual_success = {
+              r["name"]
+              for r in actual_runs
+              if r.get("status") == "completed" and r.get("conclusion") == "success"
+          }
+          actual_any = {r["name"] for r in actual_runs}
+
+          missing = required - actual_success
+          # "missing-but-ran" — the spec asks for a check that ran but didn't
+          # succeed on the target ref. Surface separately so the failure mode
+          # is distinguishable from "name typo / phantom check".
+          missing_ran_unsuccessfully = missing & actual_any
+          missing_never_ran = missing - actual_any
+
+          extra = actual_success - required
+
+          emit("# Branch Protection Drift Check")
+          emit("")
+          emit(f"Repo: `{repo}`  ")
+          emit(f"Target ref: `{head_ref}`  ")
+          emit(f"Spec file: `{spec_path}`  ")
+          if branch_in_spec:
+              emit(f"Spec branch: `{branch_in_spec}`")
+          emit("")
+
+          emit(f"## Required checks declared in spec ({len(required)})")
+          emit("")
+          if required:
+              emit("| Status | Check name |")
+              emit("| ------ | ---------- |")
+              for name in sorted(required):
+                  if name in actual_success:
+                      emit(f"| ✅ success | `{name}` |")
+                  elif name in actual_any:
+                      emit(f"| ⚠️ ran but did not succeed | `{name}` |")
+                  else:
+                      emit(f"| ❌ missing (no check_run with this name) | `{name}` |")
+          else:
+              emit("_(spec declares no required_checks)_")
+          emit("")
+
+          if extra:
+              emit(f"## Extra successful checks not in spec ({len(extra)})")
+              emit("")
+              emit(f"These ran successfully on `{head_ref}` but are not declared as required:")
+              emit("")
+              for name in sorted(extra):
+                  emit(f"- `{name}`")
+              if fail_on_extra:
+                  emit("")
+                  emit("_(`fail_on_extra: true` — these will fail the job)_\n")
+              else:
+                  emit("")
+                  emit("_(warning only — set `fail_on_extra: true` to enforce spec is canonical)_\n")
+              emit("")
+
+          if missing_never_ran:
+              emit("## ❌ DRIFT — spec references phantom checks")
+              emit("")
+              emit(
+                  "These required checks have no matching `check_run` on the target ref. "
+                  "Branch protection will silently block all PRs until either the spec is "
+                  "updated or the CI is fixed to produce these names."
+              )
+              emit("")
+              for name in sorted(missing_never_ran):
+                  emit(f"- `{name}`")
+              emit("")
+              emit(
+                  "Fix: run the CI on the target ref, copy the actual `check_run.name` "
+                  f"values into `{spec_path}` and re-apply branch protection."
+              )
+              emit("")
+
+          if missing_ran_unsuccessfully:
+              emit("## ⚠️ Required checks ran but did not succeed")
+              emit("")
+              emit(
+                  "These exist in the spec and produced a `check_run` on the target ref, "
+                  "but the latest conclusion was not `success`. The drift detector flags "
+                  "them so a red main branch doesn't masquerade as a spec drift problem."
+              )
+              emit("")
+              for name in sorted(missing_ran_unsuccessfully):
+                  emit(f"- `{name}`")
+              emit("")
+
+          if not missing and not (extra and fail_on_extra):
+              emit("## ✅ No drift")
+              emit("")
+              emit("All required checks in the spec match successful CI runs on the target ref.")
+              emit("")
+
+          # Exit codes follow GitHub's standard convention: 0 ok, 1 spec
+          # references checks that won't fire. `extra` is warn-by-default.
+          if missing_never_ran:
+              print(
+                  f"::error::Spec declares {len(missing_never_ran)} required check(s) that "
+                  f"do not exist on `{head_ref}`: {sorted(missing_never_ran)}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          if missing_ran_unsuccessfully:
+              # ran-but-failed is a CI health issue, not a drift problem.
+              # Treat as warning so this job stays focused on drift.
+              print(
+                  f"::warning::Required check(s) ran on `{head_ref}` but did not succeed: "
+                  f"{sorted(missing_ran_unsuccessfully)}",
+                  file=sys.stderr,
+              )
+          if extra and fail_on_extra:
+              print(
+                  f"::error::{len(extra)} successful check(s) on `{head_ref}` are not in "
+                  f"the spec (fail_on_extra=true): {sorted(extra)}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          PY

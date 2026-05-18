@@ -102,6 +102,79 @@ PR の required checks が全 pass すると**自動で squash merge** される
 - cross-org では `secrets: inherit` が動かないため、明示的に secrets を渡す
 - `@ippoan/test-utils` パッケージで mock/live テストヘルパーを共有可能
 
+## `branch-protection.yml`
+
+Reusable workflow that **applies** branch protection via the GitHub Branches API
+(`PUT /repos/{owner}/{repo}/branches/{branch}/protection`). See the file header
+for the full input list and a copy-pasteable caller snippet.
+
+Paired with `branch-protection-drift-check.yml` below for closed-loop IaC:
+
+1. Caller defines `.github/branch-protection.yml` (spec).
+2. `branch-protection.yml` reads the spec values and applies them.
+3. `branch-protection-drift-check.yml` validates spec entries against the
+   actual CI check-runs on the target ref.
+
+## `branch-protection-drift-check.yml`
+
+Reusable workflow that detects drift between a repo's declared branch
+protection spec and the actual check-runs produced by CI. Catches the
+class of bug where renaming a CI job (e.g. moving to a reusable workflow,
+changing the 2-tier `ci / rustfmt` to 3-tier `ci / ci / rustfmt`) silently
+leaves the protection rule referencing phantom checks that block all
+future merges.
+
+```yaml
+# .github/workflows/branch-protection-drift.yml in the consumer repo
+name: branch-protection-drift
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/branch-protection.yml'
+      - '.github/workflows/**'
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 9 * * 1'  # weekly Monday sanity check
+
+jobs:
+  drift:
+    uses: ippoan/ci-workflows/.github/workflows/branch-protection-drift-check.yml@main
+    permissions:
+      contents: read
+      checks: read
+```
+
+Spec file format (`.github/branch-protection.yml`):
+
+```yaml
+branch: main
+required_checks:
+  - "ci / ci / rustfmt"
+  - "ci / ci / clippy"
+  - "ci / ci / cargo test"
+  - "ci / ci / cargo build --release"
+```
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `spec_path` | `.github/branch-protection.yml` | Spec file path in caller repo |
+| `head_ref` | `main` | Git ref whose check-runs are the source of truth |
+| `fail_on_extra` | `false` | Fail when CI produces checks not in spec (default: warn) |
+
+Failure modes the drift check distinguishes:
+
+| Condition | Outcome | Meaning |
+|-----------|---------|---------|
+| Spec entry missing from ref's check-runs entirely | **fail** | Phantom check — protection rule blocks all PRs |
+| Spec entry ran on ref but did not succeed | warn | CI health issue, not drift |
+| Check ran successfully but not in spec | warn (or fail with `fail_on_extra`) | Optional check not declared as required |
+| All spec entries succeeded on ref | pass | Spec and CI agree |
+
+The job emits a Job Summary table so the failure is self-documenting in the
+Actions UI without needing to read the raw logs.
+
 ## `snapshot-check.yml`
 
 `ippoan/ippoan-dev-plans` で管理している plan Issue と consumer repo の `manifests/production.snapshot.json` の整合性を CI で検証する reusable workflow。
