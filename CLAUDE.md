@@ -102,6 +102,45 @@ jobs:
 | `npm_publish_propagate_repos` | `''` | publish 後に自動更新する対象リポジトリ (カンマ区切り) |
 | `npm_publish_propagate_dirs` | `''` | 対象リポジトリの working directory (カンマ区切り) |
 
+### tag-release.yml / dev-tag-release.yml
+
+リリースタグ自動採番の reusable 2 種:
+
+| reusable | 想定 trigger | タグ形式 | 用途 |
+|---|---|---|---|
+| `tag-release.yml` | `workflow_dispatch` (手動 / ci-dashboard) | `v{major}.{minor}.{patch}` semver | 正式リリース。手動 |
+| `dev-tag-release.yml` | `push: branches: [main]` | `{prefix}{N}` カウンタ (default `dev-N`) | 開発リリース。自動 |
+
+両方とも `secrets.TAG_RELEASE_PAT` (tag push 後の release workflow 連鎖発火に必要な PAT) を要求する。
+
+#### dev-tag-release.yml caller 例
+
+```yaml
+name: Dev Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+
+permissions:
+  contents: write
+
+jobs:
+  dev-release:
+    uses: ippoan/ci-workflows/.github/workflows/dev-tag-release.yml@main
+    secrets:
+      TAG_RELEASE_PAT: ${{ secrets.TAG_RELEASE_PAT }}
+```
+
+caller の release.yml は `on: push: tags: ["v*", "dev-*"]` のように **両方を受ける**ようにする。`rust-binary-release.yml` は tag に `-` が含まれていれば自動で prerelease 扱いにするので `dev-N` は `releases/latest` API に出ない (= stable consumer は影響無し)。
+
+dev チャネルを使いたい consumer (install スクリプト等) は `releases?per_page=100` を叩いて `dev-*` の最大 N を解決する。
+
 ## よくあるトラブル
 
 ### startup_failure
