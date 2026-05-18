@@ -1,0 +1,30 @@
+name: Auto Merge (self)
+
+# Dogfood: ci-workflows uses its own auto-merge reusable so PRs that pass
+# CI (actionlint) merge without manual intervention, matching the policy
+# we ship to consumer repos. The filename is `auto-merge-self.yml` to
+# avoid colliding with the reusable `auto-merge.yml` in this same
+# directory.
+#
+# Repo settings prerequisite (set once in Settings → General):
+#   - Allow auto-merge: ON
+#
+# Flow:
+#   1. PR opens / synchronizes / readied for review.
+#   2. This caller invokes ippoan/ci-workflows/.github/workflows/auto-merge.yml
+#      which runs `gh pr merge --squash` (with mergeability pre-check).
+#   3. GitHub queues the squash merge; it executes once required checks
+#      (actionlint) pass.
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
+    secrets: inherit

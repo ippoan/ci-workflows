@@ -1,0 +1,62 @@
+name: CI
+
+# Self-CI for the ci-workflows repo. Until this existed every change to a
+# reusable workflow (e.g. the new branch-protection-drift-check.yml) shipped
+# to consumers without even a syntax check — a YAML typo could break every
+# downstream repo on next reference.
+#
+# actionlint catches:
+#   - YAML syntax / structure errors in workflow files
+#   - invalid action references (`uses:` tag/version typos)
+#   - workflow_call input/output schema mismatches
+#   - GitHub Actions expression syntax (`${{ ... }}`)
+#   - deprecated syntax
+#   - shellcheck on inline `run:` blocks
+#
+# Suppressions (with rationale):
+#   - `unknown permission scope "administration"` — actionlint v1.7.12's
+#     built-in permission allowlist is stale; `administration: write` is a
+#     real GitHub Actions permission and is required by branch-protection.yml
+#     to call the Branches API. Track upstream actionlint update for removal.
+#   - shellcheck severity raised to `error` — pre-existing workflows have
+#     info/warning-level shellcheck findings that are out of scope for the
+#     PR introducing CI. Keep shellcheck enabled (errors still fail) but
+#     don't block this PR on unrelated style cleanups.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install actionlint
+        id: install
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          echo "path=$PWD/actionlint" >> "$GITHUB_OUTPUT"
+
+      - name: Run actionlint
+        env:
+          ACTIONLINT: ${{ steps.install.outputs.path }}
+          # Standard shellcheck env var — actionlint forwards it when invoking
+          # the bundled shellcheck on inline `run:` blocks.
+          SHELLCHECK_OPTS: -S error
+        run: |
+          set -euo pipefail
+          # -color: colored output in Actions logs
+          # -ignore: suppress the stale-allowlist false positive for
+          #          `administration: write`, which is a real permission
+          #          scope required by branch-protection.yml.
+          "$ACTIONLINT" -color \
+            -ignore 'unknown permission scope "administration"'
