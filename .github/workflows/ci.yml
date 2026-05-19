@@ -14,14 +14,19 @@ name: CI
 #   - shellcheck on inline `run:` blocks
 #
 # Suppressions (with rationale):
-#   - `unknown permission scope "administration"` — actionlint v1.7.12's
-#     built-in permission allowlist is stale; `administration: write` is a
-#     real GitHub Actions permission and is required by branch-protection.yml
-#     to call the Branches API. Track upstream actionlint update for removal.
 #   - shellcheck severity raised to `error` — pre-existing workflows have
 #     info/warning-level shellcheck findings that are out of scope for the
 #     PR introducing CI. Keep shellcheck enabled (errors still fail) but
 #     don't block this PR on unrelated style cleanups.
+#
+# History: an earlier version of this file also passed
+# `-ignore 'unknown permission scope "administration"'` to suppress the
+# warning emitted by branch-protection.yml's `administration: write`
+# declaration. That suppression was wrong — `administration` is not a
+# valid GITHUB_TOKEN scope, and actionlint was correctly flagging real
+# config bugs (see ippoan/ci-workflows#23 / #25 for the full write-up).
+# The suppression has been removed now that branch-protection.yml
+# routes its API call through a PAT instead.
 
 on:
   push:
@@ -55,8 +60,4 @@ jobs:
         run: |
           set -euo pipefail
           # -color: colored output in Actions logs
-          # -ignore: suppress the stale-allowlist false positive for
-          #          `administration: write`, which is a real permission
-          #          scope required by branch-protection.yml.
-          "$ACTIONLINT" -color \
-            -ignore 'unknown permission scope "administration"'
+          "$ACTIONLINT" -color
