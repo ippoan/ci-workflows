@@ -108,6 +108,40 @@ Reusable workflow that **applies** branch protection via the GitHub Branches API
 (`PUT /repos/{owner}/{repo}/branches/{branch}/protection`). See the file header
 for the full input list and a copy-pasteable caller snippet.
 
+```yaml
+# .github/workflows/branch-protection.yml in the consumer repo
+name: branch-protection
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  administration: write
+
+jobs:
+  apply:
+    uses: ippoan/ci-workflows/.github/workflows/branch-protection.yml@main
+    with:
+      branch: main
+      required_checks: |
+        ci / rustfmt
+        ci / clippy
+        ci / cargo test
+```
+
+**`workflow_dispatch` belongs on the caller, not the reusable.** The
+reusable is `workflow_call` only on purpose: a workflow file that exposes
+`workflow_dispatch` is incorrectly matched against push events by GitHub
+([actions/runner#4001](https://github.com/actions/runner/issues/4001))
+and emits a phantom 0-job failure on every push to any branch.
+Consumers that want ad-hoc manual application get it by listing
+`workflow_dispatch` on their *caller* workflow, which is the standard
+pattern and avoids the bug because the caller has a real job (`uses:`)
+that the push evaluator can match. ci-workflows itself self-applies via
+`branch-protection-self.yml` (push-only, no dispatch).
+
 Paired with `branch-protection-drift-check.yml` below for closed-loop IaC:
 
 1. Caller defines `.github/branch-protection.yml` (spec).

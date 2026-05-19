@@ -1,0 +1,40 @@
+name: Branch Protection (self)
+
+# Dogfood: ci-workflows applies its own branch protection via the reusable
+# `branch-protection.yml` shipped in this same directory, matching the
+# `auto-merge.yml` ↔ `auto-merge-self.yml` pattern.
+#
+# Only `push: branches: [main]` is used as the trigger here — deliberately
+# *not* `workflow_dispatch`. A workflow file that exposes
+# `workflow_dispatch` is incorrectly matched against push events by
+# GitHub's trigger evaluator (actions/runner#4001) and emits a phantom
+# 0-job failure on every push to any branch. Keeping this caller on
+# `push` alone means re-applying the policy is automatic on every merge
+# to `main` and produces zero phantom runs on PR branches.
+#
+# For ad-hoc re-application (e.g. after fiddling with the policy by
+# hand in the Settings UI), push an empty commit to `main` or invoke the
+# Branches API directly via `gh api -X PUT
+# repos/ippoan/ci-workflows/branches/main/protection ...`.
+#
+# Required check `actionlint` matches the job name in `ci.yml` so a PR
+# can only merge once the workflow YAML lints clean.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  administration: write
+
+jobs:
+  apply:
+    uses: ./.github/workflows/branch-protection.yml
+    with:
+      branch: main
+      required_checks: |
+        actionlint
+    permissions:
+      contents: read
+      administration: write

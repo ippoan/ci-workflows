@@ -1,12 +1,33 @@
 name: Branch Protection
 
-# Reusable workflow that self-applies branch protection to a configurable
-# branch via the GitHub Branches API. Generalised from the original
+# Reusable workflow that applies branch protection to a configurable branch
+# via the GitHub Branches API. Generalised from the original
 # yhonda-ohishi/claude-hooks `branch-protection.yml` so every consumer repo
 # can describe its protection policy declaratively in a thin caller and stay
 # in sync with policy changes that land here.
 #
-# Typical caller (drops into a repo's `.github/workflows/branch-protection.yml`):
+# This file is **workflow_call only** on purpose. PR #14 previously mirrored
+# the inputs under `workflow_dispatch` to silence a phantom "0-job failure"
+# run that GitHub emitted whenever the file was pushed. That made the
+# problem worse: a workflow file that exposes `workflow_dispatch` is
+# incorrectly matched against push events by GitHub's trigger evaluator
+# (actions/runner#4001), and the matched run fails immediately with an
+# empty jobs array. So pushing the file to *any* branch (PR or main) now
+# produced a phantom failure every time, not just on the commit that
+# touched the file.
+#
+# Dropping `workflow_dispatch` here returns the file to the same noise
+# level as the other workflow_call-only reusables in this repo
+# (`auto-merge.yml`, `dev-tag-release.yml`, …) — i.e. no phantom run on
+# unrelated PR pushes. The trade-off is that this file is no longer
+# directly runnable from the Actions UI. Self-apply (re-running the
+# protection on every push to `main` of this repo) lives in the sibling
+# caller `branch-protection-self.yml`. Consumer repos that want ad-hoc
+# manual application should put `workflow_dispatch:` on *their* caller and
+# forward inputs to this reusable.
+#
+# Typical caller (drops into a consumer repo's
+# `.github/workflows/branch-protection.yml`):
 #
 #   name: branch-protection
 #   on:
@@ -26,9 +47,6 @@ name: Branch Protection
 #           ci / clippy
 #           ci / cargo test
 #           ci / cargo build --release
-#       permissions:
-#         contents: read
-#         administration: write
 #
 # Notes on permissions: `administration: write` is required on the caller
 # job — GitHub forwards caller `permissions` to the reusable, and the
@@ -36,12 +54,6 @@ name: Branch Protection
 # inherit org-level admin from a PAT here unless it passes one as a secret.
 
 on:
-  # workflow_dispatch is also exposed so the file does not generate a
-  # phantom "no jobs / failure" run when committed/pushed. With
-  # workflow_call alone, GitHub registers a run entry on every commit that
-  # touches the file but cannot match a triggering event, and the entry
-  # ends as "failure" with 0 jobs — confusing but harmless. Mirroring the
-  # inputs here makes the file ad-hoc-runnable from the Actions UI too.
   workflow_call:
     inputs:
       branch:
@@ -66,47 +78,6 @@ on:
         default: true
       enforce_admins:
         description: 'Also enforce protection for admins (set false to let admins bypass)'
-        type: boolean
-        required: false
-        default: true
-      required_conversation_resolution:
-        description: 'Block merge until all review threads are resolved'
-        type: boolean
-        required: false
-        default: true
-      allow_force_pushes:
-        description: 'Allow force pushes to the protected branch'
-        type: boolean
-        required: false
-        default: false
-      allow_deletions:
-        description: 'Allow the protected branch to be deleted'
-        type: boolean
-        required: false
-        default: false
-      required_linear_history:
-        description: 'Require linear history (no merge commits)'
-        type: boolean
-        required: false
-        default: false
-  workflow_dispatch:
-    inputs:
-      branch:
-        description: 'Branch to protect (e.g. main, master)'
-        type: string
-        required: true
-      required_checks:
-        description: 'Newline-separated required status check contexts (empty for none)'
-        type: string
-        required: false
-        default: ''
-      strict_required_checks:
-        description: 'Require branches to be up to date before merging'
-        type: boolean
-        required: false
-        default: true
-      enforce_admins:
-        description: 'Also enforce protection for admins'
         type: boolean
         required: false
         default: true
