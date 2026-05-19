@@ -46,10 +46,10 @@ on:
         default: false
       ref:
         description: |
-          checkout / tag 対象の git ref。`pull_request: closed` から呼ぶ時は
-          `${{ github.event.pull_request.merge_commit_sha }}` を渡す
-          (PR head ではなく merge 後の main commit を tag したいため)。
-          省略時は actions/checkout default (push: main なら main HEAD)。
+          checkout / tag 対象の git ref。pull_request: closed trigger から
+          呼ぶ時は github.event.pull_request.merge_commit_sha を渡す (PR head
+          ではなく merge 後の main commit を tag したいため)。省略時は
+          actions/checkout default (push: main なら main HEAD)。
         type: string
         default: ''
     secrets:
