@@ -102,15 +102,10 @@ on:
         required: false
         default: false
 
-# Note: top-level `permissions:` is intentionally omitted. Declaring
-# `administration: write` at workflow scope appears to put this file
-# into a stale registration-stage permission allowlist (the same
-# allowlist staleness that affects actionlint v1.7.12, per `ci.yml`'s
-# suppression comment), causing GitHub to log a 0-job failure run
-# against this file on every PR push (see #23). The `apply` job below
-# still declares `administration: write` at job scope, which is what
-# matters for runtime authorization, so the workflow continues to
-# call the Branches API successfully.
+permissions:
+  contents: read
+  administration: write
+
 jobs:
   apply:
     name: Apply branch protection
