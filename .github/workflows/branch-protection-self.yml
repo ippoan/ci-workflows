@@ -4,17 +4,16 @@ name: Branch Protection (self)
 # `branch-protection.yml` shipped in this same directory, matching the
 # `auto-merge.yml` ↔ `auto-merge-self.yml` pattern.
 #
-# Only `push: branches: [main]` is used as the trigger here — deliberately
-# *not* `workflow_dispatch`. A workflow file that exposes
-# `workflow_dispatch` is incorrectly matched against push events by
-# GitHub's trigger evaluator (actions/runner#4001) and emits a phantom
-# 0-job failure on every push to any branch. Keeping this caller on
-# `push` alone means re-applying the policy is automatic on every merge
-# to `main` and produces zero phantom runs on PR branches.
+# Requires the `TAG_RELEASE_PAT` repo secret (the existing PAT used by
+# the release reusables, extended with "Administration: write" on this
+# repo) — `GITHUB_TOKEN` cannot be used because `administration` is not
+# a supported `GITHUB_TOKEN` permission scope (see the reusable's header
+# comment for the full rationale and #23 for the empirical write-up).
 #
-# For ad-hoc re-application (e.g. after fiddling with the policy by
-# hand in the Settings UI), push an empty commit to `main` or invoke the
-# Branches API directly via `gh api -X PUT
+# Only `push: branches: [main]` is used as the trigger — deliberately
+# *not* `workflow_dispatch`, to avoid the separate actions/runner#4001
+# evaluator bug. For ad-hoc re-application push an empty commit to
+# `main`, or invoke the Branches API directly via `gh api -X PUT
 # repos/ippoan/ci-workflows/branches/main/protection ...`.
 #
 # Required check `actionlint` matches the job name in `ci.yml` so a PR
@@ -24,17 +23,14 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
-  administration: write
-
 jobs:
   apply:
     uses: ./.github/workflows/branch-protection.yml
+    secrets:
+      TAG_RELEASE_PAT: ${{ secrets.TAG_RELEASE_PAT }}
     with:
       branch: main
       required_checks: |
         actionlint
     permissions:
       contents: read
-      administration: write

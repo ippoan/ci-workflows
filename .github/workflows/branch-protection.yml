@@ -6,25 +6,32 @@ name: Branch Protection
 # can describe its protection policy declaratively in a thin caller and stay
 # in sync with policy changes that land here.
 #
-# This file is **workflow_call only** on purpose. PR #14 previously mirrored
-# the inputs under `workflow_dispatch` to silence a phantom "0-job failure"
-# run that GitHub emitted whenever the file was pushed. That made the
-# problem worse: a workflow file that exposes `workflow_dispatch` is
-# incorrectly matched against push events by GitHub's trigger evaluator
-# (actions/runner#4001), and the matched run fails immediately with an
-# empty jobs array. So pushing the file to *any* branch (PR or main) now
-# produced a phantom failure every time, not just on the commit that
-# touched the file.
+# # Why a PAT secret instead of `GITHUB_TOKEN` + `permissions: administration`
 #
-# Dropping `workflow_dispatch` here returns the file to the same noise
-# level as the other workflow_call-only reusables in this repo
-# (`auto-merge.yml`, `dev-tag-release.yml`, …) — i.e. no phantom run on
-# unrelated PR pushes. The trade-off is that this file is no longer
-# directly runnable from the Actions UI. Self-apply (re-running the
-# protection on every push to `main` of this repo) lives in the sibling
-# caller `branch-protection-self.yml`. Consumer repos that want ad-hoc
-# manual application should put `workflow_dispatch:` on *their* caller and
-# forward inputs to this reusable.
+# `administration` is NOT a supported scope of the `GITHUB_TOKEN` permissions
+# block. The official scope list is `actions / attestations / checks /
+# contents / deployments / discussions / id-token / issues / models /
+# packages / pages / pull-requests / repository-projects / security-events /
+# statuses` (https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/controlling-permissions-for-github_token).
+# Confusingly there IS a fine-grained PAT repository permission called
+# "Administration" (which the Branches Protection API requires), but it
+# cannot be minted into `GITHUB_TOKEN`.
+#
+# Declaring `administration: write` at the workflow `permissions:` block
+# parses fine but fails authorization at registration time, which GitHub
+# records as a 0-job failure run on every push to any branch (see #23).
+# That is a separate phenomenon from actions/runner#4001 (the
+# `workflow_dispatch` + push event evaluator bug PR #14/#24 wrestled with):
+# the `administration:` phantom happens even after `workflow_dispatch` is
+# dropped and even on commits that do not touch the workflow file.
+#
+# This file therefore requires the caller to provide a
+# `TAG_RELEASE_PAT` secret — a fine-grained PAT or GitHub App
+# installation token with the target repo's "Administration: write" +
+# "Contents: read" repository permissions. The `permissions:` block here
+# only declares scopes that `GITHUB_TOKEN` actually supports.
+#
+# Self-apply lives in the sibling caller `branch-protection-self.yml`.
 #
 # Typical caller (drops into a consumer repo's
 # `.github/workflows/branch-protection.yml`):
@@ -36,7 +43,6 @@ name: Branch Protection
 #       branches: [main]
 #   permissions:
 #     contents: read
-#     administration: write
 #   jobs:
 #     apply:
 #       uses: ippoan/ci-workflows/.github/workflows/branch-protection.yml@main
@@ -47,11 +53,27 @@ name: Branch Protection
 #           ci / clippy
 #           ci / cargo test
 #           ci / cargo build --release
+#       secrets:
+#         TAG_RELEASE_PAT: ${{ secrets.TAG_RELEASE_PAT }}
 #
-# Notes on permissions: `administration: write` is required on the caller
-# job — GitHub forwards caller `permissions` to the reusable, and the
-# Branches API endpoint refuses a token without it. The caller cannot
-# inherit org-level admin from a PAT here unless it passes one as a secret.
+# # Migration from the pre-#23 `GITHUB_TOKEN` flow
+#
+# Consumers previously called this reusable with `secrets: inherit` (or no
+# `secrets:` block) and `permissions: { contents: read, administration:
+# write }`. To migrate:
+#   1. Mint a fine-grained PAT (account- or org-bot owned) with the target
+#      repo's "Administration: write" + "Contents: read" repository
+#      permissions. GitHub App installation tokens via
+#      `actions/create-github-app-token` work too.
+#   2. Save it as a `TAG_RELEASE_PAT` repo (or org) secret in the
+#      consumer repo.
+#   3. Update the consumer's caller to drop `administration: write` from
+#      `permissions:` and pass `TAG_RELEASE_PAT` via `secrets:`.
+#
+# Until step 2 + 3 land, the consumer's caller will fail at runtime with
+# a 403 from the Branches API. `actionlint`'s ignore flag for
+# `unknown permission scope "administration"` in this repo's `ci.yml` is
+# no longer required after this change and can be dropped in a follow-up.
 
 on:
   workflow_call:
@@ -101,10 +123,22 @@ on:
         type: boolean
         required: false
         default: false
+    secrets:
+      TAG_RELEASE_PAT:
+        description: |
+          Fine-grained PAT (or GitHub App installation token) with the
+          target repo's "Administration: write" + "Contents: read"
+          repository permissions. `GITHUB_TOKEN` cannot be used because
+          `administration` is not a supported `GITHUB_TOKEN` scope — see
+          the comment block at the top of this file.
 
-permissions:
-  contents: read
-  administration: write
+          Reuses the existing `TAG_RELEASE_PAT` secret already provisioned
+          for the `tag-release.yml` / `dev-tag-release.yml` reusables, so
+          consumers that already publish releases through ci-workflows do
+          not need to mint a separate PAT for branch protection. The PAT
+          does need to be extended with the "Administration: write"
+          permission on every target repo if it is not already there.
+        required: true
 
 jobs:
   apply:
@@ -112,11 +146,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      administration: write
     steps:
       - name: Apply branch protection on ${{ inputs.branch }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.TAG_RELEASE_PAT }}
           BRANCH: ${{ inputs.branch }}
           REQUIRED_CHECKS: ${{ inputs.required_checks }}
           STRICT: ${{ inputs.strict_required_checks }}
