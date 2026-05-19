@@ -1,0 +1,172 @@
+name: Check Dep Version
+
+# Reusable: surface "consumer is N versions behind" for a Cargo git dep.
+#
+# Parses the caller repo's Cargo.toml for `<dep_name> = { git = ..., tag = ... }`
+# (or branch/rev) and compares against the latest tag in the dependency's
+# upstream repo. Default = warn-only (annotated as a `::warning::` + Step
+# Summary); set `fail_on_stale: true` to turn it into a hard CI gate.
+#
+# Caller 例 (ippoan/github-mcp-server-rs/.github/workflows/ci.yml):
+#
+#   jobs:
+#     check-mcp-relay:
+#       uses: ippoan/ci-workflows/.github/workflows/check-dep-version.yml@main
+#       with:
+#         dep_name: mcp-relay
+#         dep_repo: ippoan/mcp-relay-rs
+#         tag_prefix: 'dev-'
+#
+# Tag sort modes:
+#   - counter (default for tag_prefix="dev-"): integer suffix sort (dev-10 > dev-2)
+#   - semver: `sort -V` (v0.0.1, v0.0.2, v0.1.0)
+# The mode is auto-detected by inspecting the first matched tag.
+
+on:
+  workflow_call:
+    inputs:
+      dep_name:
+        description: 'Dependency key in Cargo.toml (left of `=`, e.g. `mcp-relay`).'
+        required: true
+        type: string
+      dep_repo:
+        description: 'GitHub repo of the dependency, in `owner/name` form (e.g. `ippoan/mcp-relay-rs`).'
+        required: true
+        type: string
+      tag_prefix:
+        description: 'Tag prefix to filter (e.g. `dev-` or `v`). Empty = match any tag.'
+        required: false
+        type: string
+        default: ''
+      cargo_toml_path:
+        description: 'Path to Cargo.toml relative to repo root.'
+        required: false
+        type: string
+        default: 'Cargo.toml'
+      fail_on_stale:
+        description: 'Fail the job when consumer is behind. Default false = warn-only.'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  check:
+    name: ${{ inputs.dep_name }} version check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract pinned ref from Cargo.toml
+        id: current
+        env:
+          DEP_NAME: ${{ inputs.dep_name }}
+          CARGO_TOML: ${{ inputs.cargo_toml_path }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$CARGO_TOML" ]; then
+            echo "::error::$CARGO_TOML not found"
+            exit 1
+          fi
+          line=$(grep -E "^[[:space:]]*${DEP_NAME}[[:space:]]*=[[:space:]]*\{" "$CARGO_TOML" | head -1 || true)
+          if [ -z "$line" ]; then
+            echo "::error::dep '${DEP_NAME}' not found in ${CARGO_TOML}"
+            exit 1
+          fi
+          echo "raw=$line"
+          tag=$(printf '%s' "$line" | grep -oE 'tag[[:space:]]*=[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          branch=$(printf '%s' "$line" | grep -oE 'branch[[:space:]]*=[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          rev=$(printf '%s' "$line" | grep -oE 'rev[[:space:]]*=[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          if [ -n "$tag" ]; then
+            kind="tag"
+            val="$tag"
+          elif [ -n "$branch" ]; then
+            kind="branch"
+            val="$branch"
+          elif [ -n "$rev" ]; then
+            kind="rev"
+            val="$rev"
+          else
+            kind="default-branch"
+            val=""
+          fi
+          {
+            echo "kind=$kind"
+            echo "val=$val"
+          } >> "$GITHUB_OUTPUT"
+          echo "Current: $kind = $val"
+
+      - name: Resolve latest tag from ${{ inputs.dep_repo }}
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEP_REPO: ${{ inputs.dep_repo }}
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
+        run: |
+          set -euo pipefail
+          # Fetch all tag refs. Paginate to cover repos with >100 tags.
+          tags=$(gh api --paginate "repos/$DEP_REPO/git/refs/tags" --jq '.[].ref' | sed 's|refs/tags/||')
+          if [ -n "$TAG_PREFIX" ]; then
+            # Use a literal-match grep (-F) on the prefix to avoid surprises
+            # from prefixes containing regex metacharacters.
+            filtered=$(printf '%s\n' "$tags" | grep -F -- "$TAG_PREFIX" | awk -v p="$TAG_PREFIX" 'index($0, p) == 1' || true)
+          else
+            filtered="$tags"
+          fi
+          if [ -z "$filtered" ]; then
+            echo "::error::no tags matching prefix '${TAG_PREFIX}' in $DEP_REPO"
+            exit 1
+          fi
+          # Auto-detect sort mode.
+          first=$(printf '%s\n' "$filtered" | head -1)
+          suffix="${first#"$TAG_PREFIX"}"
+          if printf '%s' "$suffix" | grep -qE '^[0-9]+$'; then
+            # counter mode: integer suffix
+            latest_suffix=$(printf '%s\n' "$filtered" | sed "s|^${TAG_PREFIX}||" | sort -n | tail -1)
+            latest="${TAG_PREFIX}${latest_suffix}"
+          else
+            # semver-ish: lean on `sort -V`
+            latest=$(printf '%s\n' "$filtered" | sort -V | tail -1)
+          fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "Latest: $latest"
+
+      - name: Compare and report
+        env:
+          DEP_NAME: ${{ inputs.dep_name }}
+          DEP_REPO: ${{ inputs.dep_repo }}
+          CURRENT_KIND: ${{ steps.current.outputs.kind }}
+          CURRENT_VAL: ${{ steps.current.outputs.val }}
+          LATEST: ${{ steps.latest.outputs.latest }}
+          FAIL_ON_STALE: ${{ inputs.fail_on_stale }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### ${DEP_NAME} version check"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Upstream | [\`${DEP_REPO}\`](https://github.com/${DEP_REPO}) |"
+            echo "| Consumer pin | \`${CURRENT_KIND}${CURRENT_VAL:+ = ${CURRENT_VAL}}\` |"
+            echo "| Latest upstream tag | \`${LATEST}\` |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$CURRENT_KIND" != "tag" ]; then
+            echo "ℹ️ Consumer is not tag-pinned (\`$CURRENT_KIND\`); skipping drift check." >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::${DEP_NAME} uses ${CURRENT_KIND}, drift check skipped"
+            exit 0
+          fi
+
+          if [ "$CURRENT_VAL" = "$LATEST" ]; then
+            echo "✅ Up to date." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "⚠️ **Behind upstream.** Consider swap PR \`${CURRENT_VAL}\` → \`${LATEST}\`." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$FAIL_ON_STALE" = "true" ]; then
+            echo "::error::${DEP_NAME} pinned at ${CURRENT_VAL} but upstream latest is ${LATEST}"
+            exit 1
+          fi
+          echo "::warning::${DEP_NAME} pinned at ${CURRENT_VAL} but upstream latest is ${LATEST}"
