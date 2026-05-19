@@ -6,25 +6,35 @@ name: Branch Protection
 # can describe its protection policy declaratively in a thin caller and stay
 # in sync with policy changes that land here.
 #
-# This file is **workflow_call only** on purpose. PR #14 previously mirrored
-# the inputs under `workflow_dispatch` to silence a phantom "0-job failure"
-# run that GitHub emitted whenever the file was pushed. That made the
-# problem worse: a workflow file that exposes `workflow_dispatch` is
-# incorrectly matched against push events by GitHub's trigger evaluator
-# (actions/runner#4001), and the matched run fails immediately with an
-# empty jobs array. So pushing the file to *any* branch (PR or main) now
-# produced a phantom failure every time, not just on the commit that
-# touched the file.
+# Trigger shape: `workflow_call` plus a deliberately-never-firing
+# `push:` stub. The stub is a workaround for the phantom 0-job
+# failure run that GitHub logs against this file on every push to
+# any branch in this repo (see #23).
 #
-# Dropping `workflow_dispatch` here returns the file to the same noise
-# level as the other workflow_call-only reusables in this repo
-# (`auto-merge.yml`, `dev-tag-release.yml`, …) — i.e. no phantom run on
-# unrelated PR pushes. The trade-off is that this file is no longer
-# directly runnable from the Actions UI. Self-apply (re-running the
-# protection on every push to `main` of this repo) lives in the sibling
-# caller `branch-protection-self.yml`. Consumer repos that want ad-hoc
-# manual application should put `workflow_dispatch:` on *their* caller and
-# forward inputs to this reusable.
+# History:
+#   - PR #14 added `workflow_dispatch` to try to silence the phantom.
+#     That made it worse — workflows exposing `workflow_dispatch` are
+#     incorrectly matched against push events (actions/runner#4001),
+#     and the matched run fails instantly with an empty jobs array on
+#     every push, not just the one that touched the file.
+#   - PR #24 dropped `workflow_dispatch` again, hoping a pure
+#     `workflow_call` file would match the noise floor of the other
+#     reusables here (`auto-merge.yml`, `frontend-ci.yml`, …). It did
+#     not: PR pushes continued to emit a phantom failure under the
+#     run name `.github/workflows/branch-protection.yml` (i.e. file
+#     path, not the workflow's `name:`), suggesting GitHub failed to
+#     register the file as a push-event subscriber at all.
+#   - This commit (re #23) adds a `push:` trigger with a path filter
+#     that cannot match any real file in this repo. GitHub's
+#     registration stage now sees a push-aware workflow and (we
+#     hope) skips it cleanly on path mismatch instead of logging the
+#     phantom failure. `workflow_dispatch` is still deliberately
+#     omitted — see the actions/runner#4001 note above.
+#
+# Self-apply lives in the sibling caller `branch-protection-self.yml`.
+# Consumer repos that want ad-hoc manual application should put
+# `workflow_dispatch:` on *their* caller and forward inputs to this
+# reusable.
 #
 # Typical caller (drops into a consumer repo's
 # `.github/workflows/branch-protection.yml`):
@@ -101,6 +111,16 @@ on:
         type: boolean
         required: false
         default: false
+  # Phantom-failure workaround (see #23 / file-level comment above):
+  # this `push:` trigger references a path filter that cannot match
+  # any real file in this repo, so the workflow never actually runs
+  # on a push event. Its only purpose is to register this file as
+  # push-aware with GitHub's trigger evaluator and avoid the 0-job
+  # failure log emitted on every PR push under the
+  # `.github/workflows/branch-protection.yml` run name.
+  push:
+    paths:
+      - '.never-fire-this-trigger-do-not-create/**'
 
 permissions:
   contents: read
