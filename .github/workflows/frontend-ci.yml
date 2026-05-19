@@ -178,6 +178,7 @@ jobs:
         run: |
           REPO="${{ github.repository }}"
           BRANCH="main"
+          DASHBOARD_URL="https://auth-staging.ippoan.org/dashboard/branch-protection"
 
           # Fetch branch info with retry (unauthenticated API can hit rate limits)
           for i in 1 2 3; do
@@ -187,12 +188,14 @@ jobs:
           done
           if [ -z "$BRANCH_INFO" ]; then
             echo "::error::Cannot fetch branch info for $REPO/$BRANCH after 3 attempts"
+            echo "::error::See $DASHBOARD_URL for the expected configuration."
             exit 1
           fi
 
           PROTECTED=$(echo "$BRANCH_INFO" | jq -r '.protected')
           if [ "$PROTECTED" != "true" ]; then
             echo "::error::Branch protection is NOT enabled on $REPO/$BRANCH. Please enable it."
+            echo "::error::Check the current state and required settings here: $DASHBOARD_URL"
             exit 1
           fi
 
@@ -264,6 +267,7 @@ jobs:
             for e in "${ERRORS[@]}"; do
               echo "::error::  - $e"
             done
+            echo "::error::Check the current state and required settings here: $DASHBOARD_URL"
             exit 1
           fi
 
