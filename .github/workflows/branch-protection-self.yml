@@ -24,10 +24,11 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
-  administration: write
-
+# Top-level `permissions:` is intentionally omitted; see the
+# corresponding note in `branch-protection.yml`. The `apply` job
+# below still declares `administration: write` at job scope, which
+# is forwarded to the reusable as the actual GITHUB_TOKEN
+# authorization.
 jobs:
   apply:
     uses: ./.github/workflows/branch-protection.yml
