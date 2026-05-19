@@ -1,5 +1,27 @@
 name: Tag Release
 
+# semver `v{major}.{minor}.{patch}` tag を `workflow_dispatch` で採番 + push する
+# reusable workflow。オプションで同 job 内に GitHub Release 作成も含められる
+# (`dev-tag-release.yml` と同じ 2 mode 構造)。
+#
+# ## Mode A: tag push のみ (default、binary repo の release.yml 連鎖向け)
+#
+#   uses: ippoan/ci-workflows/.github/workflows/tag-release.yml@main
+#   with:
+#     bump: ${{ inputs.bump }}
+#   secrets:
+#     TAG_RELEASE_PAT: ${{ secrets.TAG_RELEASE_PAT }}
+#
+# ## Mode B: tag push + release 作成 (lib repo / asset 不要なら推奨)
+#
+#   uses: ippoan/ci-workflows/.github/workflows/tag-release.yml@main
+#   with:
+#     bump: ${{ inputs.bump }}
+#     create_release: true
+#
+# Mode B では `gh release create --latest` を同 job 内で実行 (stable release で
+# releases/latest に出す)。`TAG_RELEASE_PAT` 省略可。
+
 on:
   workflow_call:
     inputs:
@@ -7,10 +29,19 @@ on:
         description: 'Version bump type (patch / minor / major)'
         type: string
         default: 'patch'
+      create_release:
+        description: |
+          true なら同 job 内で `gh release create --latest` を実行する (Mode B)。
+          false (default) なら tag push のみ (Mode A、caller の release.yml 発火を期待)。
+        type: boolean
+        default: false
     secrets:
       TAG_RELEASE_PAT:
-        description: 'PAT for tag push to trigger subsequent workflows'
-        required: true
+        description: |
+          tag push 後の caller release workflow 連鎖発火に必要な PAT。
+          `create_release: true` の Mode B では省略可能 (省略時は `github.token` で push)。
+          Mode A では必須。
+        required: false
 
 jobs:
   tag-release:
@@ -21,10 +52,26 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.TAG_RELEASE_PAT }}
+          token: ${{ secrets.TAG_RELEASE_PAT || github.token }}
 
-      - name: Create and push tag
+      - name: Guard — Mode A requires TAG_RELEASE_PAT
+        if: ${{ !inputs.create_release }}
+        env:
+          PAT: ${{ secrets.TAG_RELEASE_PAT }}
         run: |
+          if [ -z "${PAT:-}" ]; then
+            echo "::error::Mode A (create_release=false) は TAG_RELEASE_PAT 必須。" >&2
+            echo "::error::caller の release.yml チェーンを使わないなら create_release: true を指定して" >&2
+            echo "::error::Mode B に切り替えるか、repo に PAT を登録してください。" >&2
+            exit 1
+          fi
+
+      - name: Compute next semver tag
+        id: tag
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
           git fetch --tags
           LATEST=$(git tag -l 'v*' --sort=-v:refname | head -1)
 
@@ -35,20 +82,49 @@ jobs:
             IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
           fi
 
-          case "${{ inputs.bump }}" in
+          case "$BUMP" in
             major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
             minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
             patch) PATCH=$((PATCH + 1)) ;;
           esac
 
           NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
 
-          echo "### Tag Release" >> "$GITHUB_STEP_SUMMARY"
-          echo "${LATEST:-none} → ${NEW_TAG} (${BUMP:-${{ inputs.bump }}})" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Tag Release"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| bump | \`${BUMP}\` |"
+            echo "| previous | \`${LATEST:-(none)}\` |"
+            echo "| new | \`${NEW_TAG}\` |"
+            echo "| commit | \`${SHORT_SHA}\` |"
+            echo "| create_release | \`${{ inputs.create_release }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Push tag
+        env:
+          NEW_TAG: ${{ steps.tag.outputs.new_tag }}
+        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "$NEW_TAG" -m "Release ${NEW_TAG}"
           git push origin "$NEW_TAG"
-
           echo "Pushed ${NEW_TAG}"
+
+      - name: Create GitHub Release (Mode B)
+        if: ${{ inputs.create_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_TAG: ${{ steps.tag.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          # v0.0.x は stable: --latest で releases/latest に出す
+          gh release create "$NEW_TAG" \
+            --title "$NEW_TAG" \
+            --generate-notes \
+            --latest
