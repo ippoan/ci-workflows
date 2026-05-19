@@ -16,7 +16,7 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Check mergeable and squash merge
+      - name: Check mergeable and queue squash merge
         env:
           GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || github.token }}
         run: |
@@ -28,4 +28,9 @@ jobs:
             echo "::error::PR #$PR has merge conflicts. Resolve conflicts before merging."
             exit 1
           fi
-          gh pr merge "$PR" --squash --repo "$REPO"
+          # `--auto` queues the merge so GitHub fires it once all required
+          # status checks + branch-protection gates clear. Without `--auto`,
+          # this job tries to merge immediately and gets rejected with
+          # "base branch policy prohibits the merge" because the very job
+          # that's running IS one of the required checks (chicken/egg).
+          gh pr merge "$PR" --auto --squash --repo "$REPO"
