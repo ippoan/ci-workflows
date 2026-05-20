@@ -21,6 +21,22 @@ name: Tag Release
 #
 # Mode B では `gh release create --latest` を同 job 内で実行 (stable release で
 # releases/latest に出す)。`TAG_RELEASE_PAT` 省略可。
+#
+# ## Per-binary stable tag (monorepo 向け、ippoan/mcp-relay-rs#9)
+#
+# monorepo に複数 binary を抱える repo で per-binary 独立 cadence で stable release
+# したい場合、`prefix` を指定すると tag 命名規則が `<prefix>v{semver}` になる:
+#
+#   uses: ippoan/ci-workflows/.github/workflows/tag-release.yml@main
+#   with:
+#     prefix: 'github-mcp-server-rs-'
+#     bump: ${{ inputs.bump }}
+#   secrets:
+#     TAG_RELEASE_PAT: ${{ secrets.TAG_RELEASE_PAT }}
+#
+# → tag `github-mcp-server-rs-v0.0.18` を push。既存 `<prefix>v*` だけ scan するので
+# 他 binary の semver と衝突しない。Mode B では `--latest` を付けない (= per-binary
+# release は `releases/latest` API を占有しない、monorepo-wide `v*` だけが latest)。
 
 on:
   workflow_call:
@@ -40,6 +56,15 @@ on:
           checkout / tag 対象の git ref。通常は省略 (workflow_dispatch から呼ばれた
           時のデフォルト main HEAD で良い)。pull_request: closed 等の特殊 trigger
           から呼ぶ場合に `merge_commit_sha` を渡す用。
+        type: string
+        default: ''
+      prefix:
+        description: |
+          Optional tag name prefix (e.g. `github-mcp-server-rs-` for per-binary
+          stable release in a monorepo). Default empty → produces `v{semver}`.
+          With prefix → produces `<prefix>v{semver}` and scans `<prefix>v*` only.
+          Mode B では prefix が空でない場合 `--latest` を付けない (releases/latest
+          は monorepo-wide な無 prefix release が占有する想定)。
         type: string
         default: ''
     secrets:
@@ -78,15 +103,18 @@ jobs:
         id: tag
         env:
           BUMP: ${{ inputs.bump }}
+          PREFIX: ${{ inputs.prefix }}
         run: |
           set -euo pipefail
           git fetch --tags
-          LATEST=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          # scan `<prefix>v*` (prefix が空なら従来通り `v*`)。
+          LATEST=$(git tag -l "${PREFIX}v*" --sort=-v:refname | head -1)
 
           if [ -z "$LATEST" ]; then
             MAJOR=0; MINOR=0; PATCH=0
           else
-            VERSION="${LATEST#v}"
+            # prefix を剥がしてから `v` も剥がして semver 取り出し。
+            VERSION="${LATEST#${PREFIX}v}"
             IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
           fi
 
@@ -96,7 +124,7 @@ jobs:
             patch) PATCH=$((PATCH + 1)) ;;
           esac
 
-          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          NEW_TAG="${PREFIX}v${MAJOR}.${MINOR}.${PATCH}"
           SHORT_SHA="$(git rev-parse --short HEAD)"
           echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
           echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
@@ -107,6 +135,7 @@ jobs:
             echo "| field | value |"
             echo "|---|---|"
             echo "| bump | \`${BUMP}\` |"
+            echo "| prefix | \`${PREFIX:-(none)}\` |"
             echo "| previous | \`${LATEST:-(none)}\` |"
             echo "| new | \`${NEW_TAG}\` |"
             echo "| commit | \`${SHORT_SHA}\` |"
@@ -129,10 +158,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           NEW_TAG: ${{ steps.tag.outputs.new_tag }}
+          PREFIX: ${{ inputs.prefix }}
         run: |
           set -euo pipefail
-          # v0.0.x は stable: --latest で releases/latest に出す
-          gh release create "$NEW_TAG" \
-            --title "$NEW_TAG" \
-            --generate-notes \
-            --latest
+          # prefix 無し (monorepo-wide / single-package repo) は stable:
+          #   --latest で releases/latest API に出す。
+          # prefix あり (per-binary stable in monorepo) は --latest を付けない:
+          #   releases/latest は無 prefix release が占有する想定。binary 個別の
+          #   stable は独自 channel として消費される (install-mcp.sh 等が
+          #   `<prefix>v*` を直接 scan)。
+          if [ -z "$PREFIX" ]; then
+            gh release create "$NEW_TAG" \
+              --title "$NEW_TAG" \
+              --generate-notes \
+              --latest
+          else
+            gh release create "$NEW_TAG" \
+              --title "$NEW_TAG" \
+              --generate-notes
+          fi
