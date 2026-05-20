@@ -47,6 +47,27 @@ on:
         description: "Binary name (must match Cargo.toml [[bin]] name)"
         required: true
         type: string
+      package:
+        description: |
+          Optional cargo `-p <package>` for workspace repos (ippoan/mcp-relay-rs
+          monorepo). 省略時は workspace root or single-crate repo として
+          `cargo build --release --target <T> --locked` を実行。
+          (`bin_name` と一致する package name が普通だが、binary 名と package 名が
+          異なる場合 (例: 1 crate に複数 [[bin]] がある場合) は明示する。)
+        required: false
+        type: string
+        default: ""
+      tag_strip_prefix:
+        description: |
+          Optional prefix to strip from `GITHUB_REF_NAME` before composing the
+          archive name. monorepo の per-binary tag (`<bin>-v0.0.X`) で asset 名が
+          `<bin>-<bin>-v0.0.X-...tar.gz` と doubling するのを防ぐ:
+            tag_strip_prefix: "github-mcp-server-rs-"
+              tag=github-mcp-server-rs-v0.0.18 → archive base=github-mcp-server-rs-v0.0.18-<target>
+          省略時は tag をそのまま使う (= 旧挙動互換)。
+        required: false
+        type: string
+        default: ""
       targets:
         description: "JSON array of target objects {target, os, archive, ext?, cross?}"
         required: false
@@ -111,9 +132,9 @@ jobs:
           shared-key: ${{ inputs.bin_name }}-${{ matrix.t.target }}
           cache-targets: false
           cache-on-failure: true
-          # default-branch push に加え tag push でも save する
-          # (default の save-if だと tag run は default branch 判定にならず、これまで一度も save されなかった)
-          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v') }}
+          # default-branch push に加え任意の tag push でも save する
+          # (旧 `refs/tags/v` 限定だと per-binary `<bin>-v*` / `dev-*` で save されない)
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/') }}
 
       - name: Install cross toolchain (aarch64-linux only)
         if: matrix.t.cross == true && runner.os == 'Linux'
@@ -135,7 +156,16 @@ jobs:
           # `std::env::var("MCP_INTERNAL_SECRET").unwrap_or_default()` し、
           # 空なら下流 resolver が dev fallback に落ちる安全設計。
           MCP_INTERNAL_SECRET: ${{ secrets.MCP_INTERNAL_SECRET }}
-        run: cargo build --release --locked --target ${{ matrix.t.target }}
+          # `package` が指定されたら `cargo build -p <pkg>` を発行 (workspace 内
+          # 特定 member だけ build する monorepo 向け)。
+          PKG: ${{ inputs.package }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PKG" ]; then
+            cargo build --release --locked -p "$PKG" --target ${{ matrix.t.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.t.target }}
+          fi
 
       - name: sccache stats
         if: always()
@@ -149,10 +179,33 @@ jobs:
       - name: Compute artifact name
         id: meta
         shell: bash
+        env:
+          STRIP_PREFIX: ${{ inputs.tag_strip_prefix }}
         run: |
+          set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          ARCHIVE_NAME="${{ inputs.bin_name }}-${TAG}-${{ matrix.t.target }}"
+          # `tag_strip_prefix: "github-mcp-server-rs-"` + tag `github-mcp-server-rs-v0.0.18`
+          # → STRIPPED=`v0.0.18` → archive=`github-mcp-server-rs-v0.0.18-<target>`
+          # (doubling 回避、ippoan/mcp-relay-rs#9)
+          if [ -n "$STRIP_PREFIX" ] && [[ "$TAG" == "${STRIP_PREFIX}"* ]]; then
+            STRIPPED="${TAG#$STRIP_PREFIX}"
+          else
+            STRIPPED="$TAG"
+          fi
+          ARCHIVE_NAME="${{ inputs.bin_name }}-${STRIPPED}-${{ matrix.t.target }}"
           echo "archive_base=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "stripped=${STRIPPED}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Asset naming"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| tag (GITHUB_REF_NAME) | \`${TAG}\` |"
+            echo "| tag_strip_prefix | \`${STRIP_PREFIX:-(none)}\` |"
+            echo "| stripped | \`${STRIPPED}\` |"
+            echo "| archive_base | \`${ARCHIVE_NAME}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Package (tar.gz)
         if: matrix.t.archive == 'tar.gz'
