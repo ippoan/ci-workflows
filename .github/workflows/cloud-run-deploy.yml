@@ -9,10 +9,14 @@ name: Cloud Run Deploy
 #     digest を指す問題 → tag ではなく digest (`@sha256:...`) で指定する
 #  3. `gcloud run services replace` は ghcr.io:// スキーム拒否 →
 #     AR remote-repo 経由の参照に統一
+#  4. `services update --image` は env / secret を触らず、初回作成時の
+#     env が必須 → declarative にしたい caller は `set_env_vars` /
+#     `update_secrets` input を使う
 #
-# 対象: daiun-salary, dtako-scraper など single-service の Cloud Run デプロイ。
-# rust-alc-api のようなマルチサービス + render.sh テンプレート化された
-# deploy は対象外 (独自 workflow 維持)。
+# 対象: daiun-salary, dtako-scraper, secrets-inventory-gcp など
+# single-service の Cloud Run デプロイ。
+# rust-alc-api のようなマルチサービス + `cloudrun/render.sh` テンプレート化された
+# deploy (そちらは `services replace -f yaml`) は対象外。
 #
 # Auth 2 経路 (caller が選ぶ):
 #  - WIF (推奨): `workload_identity_provider` + `service_account` input を渡す。
@@ -55,6 +59,16 @@ on:
         default: ''
       service_account:
         description: 'WIF で impersonate する deployer SA email (e.g. "cloud-run-deployer-staging@cloudsql-sv.iam.gserviceaccount.com")。`workload_identity_provider` と対で指定する。'
+        type: string
+        required: false
+        default: ''
+      set_env_vars:
+        description: 'gcloud run --set-env-vars にそのまま渡す (KEY=VAL,KEY2=VAL2 形式)。declarative replace: workflow が env を完全に所有する semantics。空なら env を触らない。'
+        type: string
+        required: false
+        default: ''
+      update_secrets:
+        description: 'gcloud run --update-secrets にそのまま渡す (ENV=SECRET:VERSION 形式)。additive update: listed な binding のみ追加/更新し、他は保持。空なら secrets を触らない。'
         type: string
         required: false
         default: ''
@@ -118,13 +132,26 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Deploy image (digest-pinned)
+        env:
+          SET_ENV_VARS: ${{ inputs.set_env_vars }}
+          UPDATE_SECRETS: ${{ inputs.update_secrets }}
         run: |
           AR_IMAGE="${{ inputs.ar_repo }}@${{ steps.digest.outputs.digest }}"
           echo "Deploying $AR_IMAGE to ${{ inputs.service }}..."
-          gcloud run services update "${{ inputs.service }}" \
-            --region "${{ inputs.region }}" \
-            --project "${{ inputs.project }}" \
+          ARGS=(
+            --region "${{ inputs.region }}"
+            --project "${{ inputs.project }}"
             --image "$AR_IMAGE"
+          )
+          if [ -n "$SET_ENV_VARS" ]; then
+            ARGS+=(--set-env-vars "$SET_ENV_VARS")
+            echo "  --set-env-vars: $SET_ENV_VARS"
+          fi
+          if [ -n "$UPDATE_SECRETS" ]; then
+            ARGS+=(--update-secrets "$UPDATE_SECRETS")
+            echo "  --update-secrets: $UPDATE_SECRETS"
+          fi
+          gcloud run services update "${{ inputs.service }}" "${ARGS[@]}"
 
       - name: Route 100% traffic to latest revision
         run: |
