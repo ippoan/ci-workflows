@@ -9,9 +9,10 @@ name: Cloud Run Deploy
 #     digest を指す問題 → tag ではなく digest (`@sha256:...`) で指定する
 #  3. `gcloud run services replace` は ghcr.io:// スキーム拒否 →
 #     AR remote-repo 経由の参照に統一
-#  4. `services update --image` は env / secret を触らず、初回作成時の
-#     env が必須 → declarative にしたい caller は `set_env_vars` /
-#     `update_secrets` input を使う
+#  4. `services update --image` は env / secret / runtime SA を触らず、初回
+#     作成時の設定が必須 → declarative にしたい caller は
+#     `set_env_vars` / `update_secrets` / `runtime_service_account`
+#     input を使う
 #
 # 対象: daiun-salary, dtako-scraper, secrets-inventory-gcp など
 # single-service の Cloud Run デプロイ。
@@ -58,7 +59,7 @@ on:
         required: false
         default: ''
       service_account:
-        description: 'WIF で impersonate する deployer SA email (e.g. "cloud-run-deployer-staging@cloudsql-sv.iam.gserviceaccount.com")。`workload_identity_provider` と対で指定する。'
+        description: 'WIF で impersonate する deployer SA email (e.g. "cloud-run-deployer-staging@cloudsql-sv.iam.gserviceaccount.com")。`workload_identity_provider` と対で指定する。これは deploy 側の SA で、Cloud Run service の attached runtime SA とは別。'
         type: string
         required: false
         default: ''
@@ -69,6 +70,11 @@ on:
         default: ''
       update_secrets:
         description: 'gcloud run --update-secrets にそのまま渡す (ENV=SECRET:VERSION 形式)。additive update: listed な binding のみ追加/更新し、他は保持。空なら secrets を触らない。'
+        type: string
+        required: false
+        default: ''
+      runtime_service_account:
+        description: 'Cloud Run service に attach する runtime SA email (e.g. "secrets-inventory-viewer@cloudsql-sv.iam.gserviceaccount.com")。gcloud run --service-account に渡す。指定時は毎 deploy で enforce され、誰かが手動で別 SA に戻しても次の deploy で自動修正される。空なら runtime SA を触らない (初回作成時の SA が保持される)。これは Cloud Run 側の SA で、WIF impersonate 対象の deployer SA (`service_account`) とは別。'
         type: string
         required: false
         default: ''
@@ -135,6 +141,7 @@ jobs:
         env:
           SET_ENV_VARS: ${{ inputs.set_env_vars }}
           UPDATE_SECRETS: ${{ inputs.update_secrets }}
+          RUNTIME_SA: ${{ inputs.runtime_service_account }}
         run: |
           AR_IMAGE="${{ inputs.ar_repo }}@${{ steps.digest.outputs.digest }}"
           echo "Deploying $AR_IMAGE to ${{ inputs.service }}..."
@@ -143,6 +150,10 @@ jobs:
             --project "${{ inputs.project }}"
             --image "$AR_IMAGE"
           )
+          if [ -n "$RUNTIME_SA" ]; then
+            ARGS+=(--service-account "$RUNTIME_SA")
+            echo "  --service-account: $RUNTIME_SA"
+          fi
           if [ -n "$SET_ENV_VARS" ]; then
             ARGS+=(--set-env-vars "$SET_ENV_VARS")
             echo "  --set-env-vars: $SET_ENV_VARS"
