@@ -1,0 +1,96 @@
+name: Go CI
+
+# Reusable CI pipeline for Go services in the ippoan org.
+# go vet / go test / go build を 3 job に分けて、caller 側で `jobs.ci:` から
+# 呼ばれた時に status check 名が `ci / vet` / `ci / test` / `ci / build`
+# となるようにする (caller job id + ' / ' + reusable job name)。
+#
+# 名前を 3 つ固定値にしているのは、auth-worker 側の
+# `branch-protection-presets.ts` の `ippoan-go-default` preset が同じ 3 つを
+# required_status_checks にピン留めしているため。どちらかが動いたら drift
+# になるので preset 側の unit test (`branch-protection-presets.test.ts`) も
+# 連動して更新すること。
+#
+# Caller 例 (ippoan/secrets-inventory-gcp/.github/workflows/ci.yml):
+#
+#   permissions:
+#     contents: read
+#
+#   jobs:
+#     ci:
+#       uses: ippoan/ci-workflows/.github/workflows/go-ci.yml@main
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: 'go コマンドの作業 directory (default: repo root)'
+        required: false
+        type: string
+        default: '.'
+      go_version_file:
+        description: 'setup-go の go-version-file 入力 (default: go.mod)'
+        required: false
+        type: string
+        default: 'go.mod'
+      vet_args:
+        description: 'go vet に渡す追加 args'
+        required: false
+        type: string
+        default: './...'
+      test_args:
+        description: 'go test に渡す追加 args'
+        required: false
+        type: string
+        default: './...'
+      build_args:
+        description: 'go build に渡す追加 args (artifact が要らないので /tmp/server に吐く)'
+        required: false
+        type: string
+        default: '-o /tmp/server ./...'
+
+jobs:
+  vet:
+    name: vet
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.working_directory }}/${{ inputs.go_version_file }}
+          cache: true
+          cache-dependency-path: ${{ inputs.working_directory }}/go.sum
+      - run: go vet ${{ inputs.vet_args }}
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.working_directory }}/${{ inputs.go_version_file }}
+          cache: true
+          cache-dependency-path: ${{ inputs.working_directory }}/go.sum
+      - run: go test ${{ inputs.test_args }}
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.working_directory }}/${{ inputs.go_version_file }}
+          cache: true
+          cache-dependency-path: ${{ inputs.working_directory }}/go.sum
+      - run: go build ${{ inputs.build_args }}
