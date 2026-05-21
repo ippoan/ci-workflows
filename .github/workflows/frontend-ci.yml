@@ -175,20 +175,43 @@ jobs:
     steps:
       - name: Verify branch protection
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           REPO="${{ github.repository }}"
           BRANCH="main"
           DASHBOARD_URL="https://auth-staging.ippoan.org/dashboard/branch-protection"
 
-          # Fetch branch info with retry (unauthenticated API can hit rate limits)
-          for i in 1 2 3; do
-            BRANCH_INFO=$(curl -sf "https://api.github.com/repos/$REPO/branches/$BRANCH") && break
-            echo "::warning::Attempt $i failed, retrying in 5s..."
-            sleep 5
-          done
-          if [ -z "$BRANCH_INFO" ]; then
-            echo "::error::Cannot fetch branch info for $REPO/$BRANCH after 3 attempts"
-            echo "::error::See $DASHBOARD_URL for the expected configuration."
+          # GitHub API は **authenticated** で叩く。anonymous は 60 req/hr/IP の
+          # 厳しい rate limit があり、GitHub Actions runner IP は共有なので
+          # workflow_call で複数 PR が並行している時に頻繁に hit する。
+          # GITHUB_TOKEN 経由なら 5000 req/hr/repo。
+          fetch_with_retry() {
+            local url=$1; shift
+            local body=""
+            for i in 1 2 3 4; do
+              if body=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+                              -H "Accept: application/vnd.github+json" \
+                              -H "X-GitHub-Api-Version: 2022-11-28" \
+                              "$url" "$@"); then
+                printf '%s' "$body"
+                return 0
+              fi
+              if [ "$i" -lt 4 ]; then
+                # exponential backoff: 5s, 10s, 20s
+                local delay=$((5 * 2 ** (i - 1)))
+                echo "::warning::Attempt $i of GET $url failed, retrying in ${delay}s..." >&2
+                sleep "$delay"
+              fi
+            done
+            return 1
+          }
+
+          # /branches/$BRANCH — 「protected かどうか」を判定する一次ソース。
+          # ここで取れないと残りの判定が無意味なので、失敗時は明示的に exit 1。
+          if ! BRANCH_INFO=$(fetch_with_retry "https://api.github.com/repos/$REPO/branches/$BRANCH"); then
+            echo "::error::Cannot fetch branch info for $REPO/$BRANCH after 4 attempts (likely transient GitHub API failure)"
+            echo "::error::Re-run this job to retry, or see $DASHBOARD_URL for the expected configuration."
             exit 1
           fi
 
@@ -199,12 +222,13 @@ jobs:
             exit 1
           fi
 
-          # Fetch detailed protection (works for public repos without auth)
-          PROTECTION=$(curl -sf "https://api.github.com/repos/$REPO/branches/$BRANCH/protection") || {
-            echo "::warning::Cannot read protection details (private repo or rate limit). Skipping detailed check."
+          # /protection — 取れたら詳細チェック、取れなければ warning + 詳細はスキップ。
+          # transient エラーで PR を ❌ にしないため、ここは exit 0 寄り (= 緩い)。
+          if ! PROTECTION=$(fetch_with_retry "https://api.github.com/repos/$REPO/branches/$BRANCH/protection"); then
+            echo "::warning::Cannot read protection details after 4 attempts (private repo, rate limit, or transient). Skipping detailed check."
             echo "✅ Branch is protected (details not verifiable)"
             exit 0
-          }
+          fi
 
           ERRORS=()
 
@@ -238,28 +262,39 @@ jobs:
             ERRORS+=("No 'ci /' required status check found")
           fi
 
-          # Check: auto-merge enabled + delete branch on merge
-          REPO_INFO=$(curl -sf "https://api.github.com/repos/$REPO") || true
-          AUTO_MERGE=$(echo "$REPO_INFO" | jq -r '.allow_auto_merge // false')
-          if [ "$AUTO_MERGE" != "true" ]; then
-            ERRORS+=("Auto-merge is not enabled (Settings > General > Allow auto-merge)")
-          fi
-
-          DELETE_BRANCH=$(echo "$REPO_INFO" | jq -r '.delete_branch_on_merge // false')
-          if [ "$DELETE_BRANCH" != "true" ]; then
-            ERRORS+=("Delete branch on merge is not enabled (Settings > General > Automatically delete head branches)")
-          fi
-
-          # Check: Ruleset exists with no bypass actors (admin bypass prevention)
-          RULESETS=$(curl -sf "https://api.github.com/repos/$REPO/rulesets" \
-            -H "Authorization: Bearer ${{ github.token }}" 2>/dev/null) || true
-          if [ -n "$RULESETS" ] && [ "$RULESETS" != "[]" ]; then
-            HAS_NO_BYPASS=$(echo "$RULESETS" | jq '[.[] | select(.enforcement == "active" and (.bypass_actors | length) == 0)] | length > 0')
-            if [ "$HAS_NO_BYPASS" != "true" ]; then
-              ERRORS+=("No active Ruleset with empty bypass_actors found (admin can bypass CI with --admin)")
+          # Check: auto-merge enabled + delete branch on merge.
+          # /repos/$REPO の取得失敗は transient 扱い (= ERRORS には積まず warning)
+          # にして PR を不要に止めない。設定漏れは branch protection の
+          # /protection 側でも別途気付ける。
+          if REPO_INFO=$(fetch_with_retry "https://api.github.com/repos/$REPO"); then
+            AUTO_MERGE=$(echo "$REPO_INFO" | jq -r '.allow_auto_merge // false')
+            if [ "$AUTO_MERGE" != "true" ]; then
+              ERRORS+=("Auto-merge is not enabled (Settings > General > Allow auto-merge)")
+            fi
+            DELETE_BRANCH=$(echo "$REPO_INFO" | jq -r '.delete_branch_on_merge // false')
+            if [ "$DELETE_BRANCH" != "true" ]; then
+              ERRORS+=("Delete branch on merge is not enabled (Settings > General > Automatically delete head branches)")
             fi
           else
-            ERRORS+=("No Rulesets configured (admin can bypass CI with gh pr merge --admin)")
+            echo "::warning::Cannot fetch /repos/$REPO after 4 attempts — skipping auto-merge / delete-on-merge check"
+          fi
+
+          # Check: Ruleset exists with no bypass actors (admin bypass prevention).
+          # /rulesets は GITHUB_TOKEN に administration:read が無いと 403 を返す。
+          # caller が `permissions: { administration: read }` を宣言していない repo
+          # では PR を不要に止めず、warning だけ出して skip する (=設定が正しくても
+          # token 不足で false-fail しない)。
+          if RULESETS=$(fetch_with_retry "https://api.github.com/repos/$REPO/rulesets"); then
+            if [ -n "$RULESETS" ] && [ "$RULESETS" != "[]" ]; then
+              HAS_NO_BYPASS=$(echo "$RULESETS" | jq '[.[] | select(.enforcement == "active" and (.bypass_actors | length) == 0)] | length > 0')
+              if [ "$HAS_NO_BYPASS" != "true" ]; then
+                ERRORS+=("No active Ruleset with empty bypass_actors found (admin can bypass CI with --admin)")
+              fi
+            else
+              ERRORS+=("No Rulesets configured (admin can bypass CI with gh pr merge --admin)")
+            fi
+          else
+            echo "::warning::Cannot fetch /rulesets for $REPO (token may lack 'administration: read'). Skipping ruleset check."
           fi
 
           if [ ${#ERRORS[@]} -gt 0 ]; then
