@@ -132,6 +132,15 @@ jobs:
   # 3 つの opt-in input すべてが non-empty のとき以外は skip — 既存 caller
   # への影響無し (default 値が空文字列で if 評価 false になるため backward
   # compatible)。
+  #
+  # ⚠ Caller permissions 要件:
+  # 本 job は nested 内蔵で `secret-verify-gcp.yml` を呼ぶため
+  # `permissions: id-token: write` を要求する。これは **`if:` で skip
+  # される run でも reusable workflow の parse 段階で caller permissions
+  # check が走るため**、caller が `id-token: write` を declare していないと
+  # workflow 全体が `startup_failure` になる (job 起動前にエラー、ログ出ず)。
+  # caller の `jobs.<id>:` または top-level の `permissions:` で必ず
+  # `id-token: write` を declare すること。詳細は本 repo CLAUDE.md。
   secret-verify:
     name: secret-verify
     if: |
