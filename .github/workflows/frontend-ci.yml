@@ -99,6 +99,31 @@ on:
         description: 'Comma-separated working directories per repo (e.g. ".,.,web"). Must match propagate_repos order.'
         type: string
         default: ''
+      # ----- Optional opt-in: GCP secret-verify integration -----
+      # secret-verify-gcp.yml を本 reusable の中に直列 (test/typecheck の
+      # 後) で組み込むフック。caller (`test.yml`) が別 workflow を持たずに
+      # WIF vars を渡すだけで verify が `ci / secret-verify` として参加する。
+      # 3 つの input すべて non-empty のときだけ動く (= backward compat)。
+      gcp_secret_verify_project:
+        description: 'GCP project to verify against (e.g. cloudsql-sv). Empty = skip the verify job entirely.'
+        required: false
+        type: string
+        default: ''
+      gcp_secret_verify_provider:
+        description: 'WIF provider full resource name. Pass vars.GCP_WIF_PROVIDER from caller.'
+        required: false
+        type: string
+        default: ''
+      gcp_secret_verify_sa:
+        description: 'WIF impersonation target SA email (verify 用、secretmanager.viewer role が必要)。'
+        required: false
+        type: string
+        default: ''
+      gcp_secret_verify_wrangler_path:
+        description: 'wrangler.jsonc / .toml の path。default は autodetect (リポジトリ root)。Worker 限定 input、Nuxt では使用不可。'
+        required: false
+        type: string
+        default: ''
     secrets:
       CLOUDFLARE_API_TOKEN:
         description: Cloudflare API token for wrangler deploy
@@ -658,9 +683,32 @@ jobs:
         if: always()
         run: docker compose -f ${{ inputs.integration_compose_file }} down -v
 
+  # secret-verify は test/typecheck/integration-test の **後**、deploy の
+  # **前**。GCP Secret Manager に missing がある状態で wrangler deploy する
+  # と worker が起動時に env 参照で死ぬので、deploy を block する位置に置く。
+  # opt-in 3 input が空のときは skip され、deploy 側は skip を success
+  # 扱いで進める (= backward compat、既存 caller 無影響)。
+  secret-verify:
+    name: secret-verify
+    if: |
+      inputs.gcp_secret_verify_project != '' &&
+      inputs.gcp_secret_verify_provider != '' &&
+      inputs.gcp_secret_verify_sa != ''
+    needs: [test, typecheck, integration-test]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/secret-verify-gcp.yml
+    with:
+      project: ${{ inputs.gcp_secret_verify_project }}
+      repo_type: worker
+      wrangler_path: ${{ inputs.gcp_secret_verify_wrangler_path }}
+      workload_identity_provider: ${{ inputs.gcp_secret_verify_provider }}
+      service_account: ${{ inputs.gcp_secret_verify_sa }}
+
   deploy-staging:
     name: Deploy Staging
-    needs: [test, typecheck, integration-test, branch-protection]
+    needs: [test, typecheck, integration-test, branch-protection, secret-verify]
     if: >-
       always() &&
       inputs.has_deploy &&
@@ -670,7 +718,8 @@ jobs:
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success' &&
       (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
-      (needs.branch-protection.result == 'success' || needs.branch-protection.result == 'skipped')
+      (needs.branch-protection.result == 'success' || needs.branch-protection.result == 'skipped') &&
+      (needs.secret-verify.result == 'success' || needs.secret-verify.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -869,7 +918,7 @@ jobs:
 
   auto-merge:
     name: Auto Merge
-    needs: [test, typecheck, integration-test, branch-protection, deploy-staging]
+    needs: [test, typecheck, integration-test, branch-protection, secret-verify, deploy-staging]
     if: >-
       always() &&
       github.event_name == 'pull_request' &&
@@ -878,6 +927,7 @@ jobs:
       needs.typecheck.result == 'success' &&
       (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
       (needs.branch-protection.result == 'success' || needs.branch-protection.result == 'skipped') &&
+      (needs.secret-verify.result == 'success' || needs.secret-verify.result == 'skipped') &&
       (needs.deploy-staging.result == 'success' || needs.deploy-staging.result == 'skipped')
     uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
     permissions:
