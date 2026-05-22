@@ -81,6 +81,35 @@ on:
         default: false
 
 jobs:
+  # PR auto-merge を CI 開始時に強制 disable する defense-in-depth step。
+  # branch protection の required check に CI が含まれていない repo で、
+  # `enable_pr_auto_merge` API call が即 merge を引き起こす事故 (ippoan/
+  # secrets-inventory-gcp#20 で被害発生済) を防ぐ。本 step は idempotent
+  # (= 既に disable なら no-op)。
+  #
+  # caller は本 job 用に top-level または `ci:` job-level の `permissions:`
+  # に **`pull-requests: write`** を declare する必要あり。declare していない
+  # と `startup_failure` (= GitHub Actions の reusable parse 時の permissions
+  # check)。go-ci.yml は本 job 以前は `pull-requests:` を使う job が無かった
+  # ため、本 commit は caller の breaking change を伴う (詳細: CLAUDE.md)。
+  #
+  # CI 完走後の auto-merge 再 enable は caller 側で ci-workflows の
+  # auto-merge.yml@main を call する (go-ci.yml には embed されない)。
+  disable-auto-merge:
+    name: Disable PR auto-merge (CI start)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Force-disable PR auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr merge --disable-auto "$PR_NUMBER" -R "$REPO" || true
+
   vet:
     name: vet
     runs-on: ubuntu-latest
