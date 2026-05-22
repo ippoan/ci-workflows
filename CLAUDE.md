@@ -16,9 +16,11 @@ ippoan org 共通の GitHub Actions reusable workflows。
 ```yaml
 permissions:
   contents: write        # auto-merge で必要
-  pull-requests: write   # pr-limit, auto-merge で必要
+  pull-requests: write   # pr-limit, disable-auto-merge, auto-merge で必要
   packages: read         # npm_scope 使用時に必要
 ```
+
+frontend-ci.yml は内蔵で **`disable-auto-merge` job** を持ち、CI 開始時に PR の auto-merge を強制 disable する (= branch protection が緩い repo での誤 merge 防止)。CI 完走後は内蔵の `auto-merge` job が再 enable する dual-step pattern。go-ci.yml も同じ `disable-auto-merge` job を内蔵 (= `pull-requests: write` 必須化、これは 2026-05 以降の breaking change)。
 
 ##### secret-verify を併用する場合 (追加)
 
@@ -163,14 +165,15 @@ Go 向け CI pipeline。`vet` / `test` / `build` の 3 job + (opt-in) `secret-ve
 name: CI
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
 
+# go-ci.yml は内部に `disable-auto-merge` job を持ち `pull-requests: write`
+# を要求する。secret-verify を併用する場合は `id-token: write` も追加。
 permissions:
   contents: read
+  pull-requests: write
+  id-token: write
 
 jobs:
   ci:
@@ -182,6 +185,8 @@ jobs:
 ```
 
 3 つの verify input を全部空にすると `secret-verify` job は skip され、`vet/test/build` だけが status check に出る (= 既存 caller への backward compat)。
+
+> **caller 側で CI 完走後に auto-merge を enable したい場合**: caller workflow に `auto-merge` job を追加し `ippoan/ci-workflows/.github/workflows/auto-merge.yml@main` を呼ぶ (= frontend-ci.yml と同じ pattern を caller で組み立てる)。go-ci.yml には `auto-merge` job は embed されていない (= build / deploy job は caller 固有のため、caller の `needs:` から組む方が柔軟)。実例: `ippoan/secrets-inventory-gcp` の `ci.yml`。
 
 ### Secret verify を frontend-ci.yml / go-ci.yml の中に取り込む経緯
 

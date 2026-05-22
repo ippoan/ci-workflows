@@ -138,6 +138,30 @@ on:
         required: false
 
 jobs:
+  # PR auto-merge を CI 開始時に強制 disable する defense-in-depth step。
+  # branch protection の required check に CI が含まれていない repo で、
+  # `enable_pr_auto_merge` API call が即 merge を引き起こす事故 (PR #20
+  # で被害発生済) を防ぐ。本 step は idempotent (= 既に disable なら no-op)。
+  #
+  # auto-merge job は CI 完走後にここで再 enable する流れ (= dual-step
+  # pattern: 開始時 disable / 完走後 enable)。caller が手動で
+  # enable_pr_auto_merge を呼んでも、本 step が直後に disable するため
+  # CI 結果を待たない誤 merge が起きない。
+  disable-auto-merge:
+    name: Disable PR auto-merge (CI start)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Force-disable PR auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr merge --disable-auto "$PR_NUMBER" -R "$REPO" || true
+
   pr-limit:
     name: PR Limit Check
     if: github.event_name == 'pull_request'
