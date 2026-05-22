@@ -74,6 +74,11 @@ on:
         required: false
         type: string
         default: '.github/workflows/ci.yml'
+      gcp_secret_verify_apply_labels:
+        description: 'Verify 成功後に GCP Secret Manager の secret に `used-by-<owner>-<repo>=active|removed` label を打つ。requires `secretmanager.secrets.update` on the verify SA. default false (= label を触らない、IAM 追加 grant 不要)。'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   vet:
@@ -144,3 +149,4 @@ jobs:
       workload_identity_provider: ${{ inputs.gcp_secret_verify_provider }}
       service_account: ${{ inputs.gcp_secret_verify_sa }}
       ci_workflow_path: ${{ inputs.gcp_secret_verify_ci_workflow_path }}
+      apply_labels: ${{ inputs.gcp_secret_verify_apply_labels }}

@@ -124,6 +124,11 @@ on:
         required: false
         type: string
         default: ''
+      gcp_secret_verify_apply_labels:
+        description: 'Verify 成功後に GCP Secret Manager の secret に `used-by-<owner>-<repo>=active|removed` label を打つ。requires `secretmanager.secrets.update` on the verify SA. default false。'
+        required: false
+        type: boolean
+        default: false
     secrets:
       CLOUDFLARE_API_TOKEN:
         description: Cloudflare API token for wrangler deploy
@@ -705,6 +710,7 @@ jobs:
       wrangler_path: ${{ inputs.gcp_secret_verify_wrangler_path }}
       workload_identity_provider: ${{ inputs.gcp_secret_verify_provider }}
       service_account: ${{ inputs.gcp_secret_verify_sa }}
+      apply_labels: ${{ inputs.gcp_secret_verify_apply_labels }}
 
   deploy-staging:
     name: Deploy Staging
