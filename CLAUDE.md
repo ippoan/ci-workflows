@@ -20,6 +20,38 @@ permissions:
   packages: read         # npm_scope 使用時に必要
 ```
 
+##### secret-verify を併用する場合 (追加)
+
+`gcp_secret_verify_*` input を渡して `secret-verify` job を有効化する **or
+将来有効化する可能性がある** caller は、追加で `id-token: write` を
+declare すること。`if:` で skip される run でも、reusable workflow の parse
+時に caller permissions check が走るため、declare していないと `secret-
+verify` を **使わない caller でも** `startup_failure` になる。
+
+top-level に追加するか、`jobs.<id>:` の job-level に追加するかは好み:
+
+```yaml
+# Option A: top-level (全 job で使える)
+permissions:
+  contents: write
+  pull-requests: write
+  packages: read
+  id-token: write        # secret-verify (nested in frontend-ci.yml) で必要
+
+# Option B: job-level (= secret-verify を実際に走らせる job だけに絞る)
+jobs:
+  ci:
+    uses: ippoan/ci-workflows/.github/workflows/frontend-ci.yml@main
+    permissions:
+      contents: read
+      id-token: write    # secret-verify で必要
+    with: { ... }
+    secrets: inherit
+```
+
+secrets-inventory-gcp の `ci.yml` は Option B (job-level)、secrets-inventory
+の `test.yml` も Option B で揃えている。
+
 #### Caller テンプレート (Worker)
 
 ```yaml
@@ -188,3 +220,18 @@ dev チャネルを使いたい consumer (install スクリプト等) は `relea
 caller の `permissions` が不足している。上記の必須 permissions を確認すること。
 GitHub は reusable workflow のジョブが要求する権限が caller で許可されていない場合、
 ジョブを起動せず `startup_failure` を返す。エラーメッセージは表示されない。
+
+#### `id-token: write` 不足のケース (frontend-ci.yml / go-ci.yml)
+
+`feat(ci): bake secret-verify into go-ci/frontend-ci` (ci-workflows#38) で
+nested 内蔵された `secret-verify` job が `permissions: id-token: write`
+を要求する。caller の `permissions:` (top-level or job-level) で declare
+していないと、**`gcp_secret_verify_*` input を渡していない caller でも**
+parse 時 check で `startup_failure` になる。
+
+判定: PR push 直後に `name: CI` workflow run が 1 秒で `startup_failure`
+で完了 (job 0 件、log 0 行) するパターン。run UI 上では空の jobs 列が出る。
+
+修正: caller workflow の `permissions:` (top-level または `jobs.ci.permissions:`)
+に `id-token: write` を追加。`if:` で skip される予定でも省略不可
+(= GitHub Actions は parse 時に required permissions を計算するため)。
