@@ -209,6 +209,99 @@ Failure modes the drift check distinguishes:
 The job emits a Job Summary table so the failure is self-documenting in the
 Actions UI without needing to read the raw logs.
 
+## `secret-verify-gcp.yml`
+
+Reusable workflow that verifies every secret a repo declares is backed up
+in GCP Secret Manager. Missing backups fail the job + block merges, so the
+Cloudflare-Secrets-Store integration period cannot drift "declared in code
+but not yet backed up in GCP".
+
+Verification target is always `gcloud secrets list` in `inputs.project`.
+What gets declared as "required" depends on the repo type:
+
+| `repo_type` | Source of declarations |
+|---|---|
+| `rust` | `cloudrun/render.sh <svc> <env> <sha>` → `service.yaml` → `secretKeyRef.name` |
+| `worker` | `wrangler.jsonc` / `.toml` → `secrets.required` array |
+
+### Worker `secrets.required` 3-state model
+
+| State | wrangler config | Behaviour |
+|---|---|---|
+| Undeclared | `secrets` key absent | **fail** — "declare an explicit list, use `[]` if no secrets needed" |
+| Explicit empty | `"required": []` | pass (nothing to compare) |
+| Enumerated | `"required": ["A","B"]` | each name compared against GCP |
+
+The undeclared-fails behaviour forces the audit decision to be conscious.
+There is no warn mode — declared-but-not-backed-up secrets block the PR
+from day one, the operator runs `gcloud secrets create`, the block clears.
+Caller opt-in controls blast radius.
+
+### Caller (Rust + Cloud Run, WIF auth)
+
+```yaml
+name: Verify GCP Secrets
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify:
+    uses: ippoan/ci-workflows/.github/workflows/secret-verify-gcp.yml@main
+    with:
+      project: cloudsql-sv
+      repo_type: rust
+      render_services: 'backend gateway tenko carins dtako trouble'
+      workload_identity_provider: projects/123/locations/global/workloadIdentityPools/github/providers/ippoan
+      service_account: gcp-secret-verifier@cloudsql-sv.iam.gserviceaccount.com
+```
+
+### Caller (Worker, SA JSON key auth)
+
+```yaml
+name: Verify GCP Secrets
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: ippoan/ci-workflows/.github/workflows/secret-verify-gcp.yml@main
+    with:
+      project: cloudsql-sv
+      repo_type: worker
+      # wrangler_path: ''  # autodetects wrangler.jsonc / .toml / .json
+    secrets:
+      GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+```
+
+| Input | Default | Description |
+|---|---|---|
+| `project` | (required) | GCP project ID containing the Secret Manager secrets |
+| `repo_type` | (required) | `rust` or `worker` |
+| `render_services` | `''` | rust: space-separated Cloud Run service names |
+| `render_env` | `production` | rust: env arg passed to render.sh |
+| `render_script` | `cloudrun/render.sh` | rust: path to render.sh |
+| `render_sha` | `verify-dummy-sha` | rust: placeholder SHA arg (we only read secretKeyRef.name) |
+| `render_extra_env` | `''` | rust: extra env vars render.sh templates require (KEY=VAL per line) |
+| `wrangler_path` | `''` | worker: path to wrangler config (autodetect when empty) |
+| `workload_identity_provider` | `''` | WIF provider resource name (omit to use GCP_SA_KEY) |
+| `service_account` | `''` | WIF impersonation SA email |
+
+Required GCP permission: `secretmanager.secrets.list` on `inputs.project`
+(Secret Manager Viewer role minimum). Payloads are never read; only names.
+
 ## `snapshot-check.yml`
 
 `ippoan/ippoan-dev-plans` で管理している plan Issue と consumer repo の `manifests/production.snapshot.json` の整合性を CI で検証する reusable workflow。
