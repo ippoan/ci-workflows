@@ -48,6 +48,32 @@ on:
         required: false
         type: string
         default: '-o /tmp/server ./...'
+      # ----- Optional opt-in: GCP secret-verify integration -----
+      # secret-verify-gcp.yml を **本 reusable の中に直列 (vet/test/build の
+      # 後)** で組み込むためのフック。3 つの input すべてが non-empty のとき
+      # だけ verify job が動く。caller 側で別ワークフロー (`secret-verify.yml`)
+      # を書く必要が無くなり、status check の DAG が `ci / {vet,test,build,
+      # secret-verify}` の 1 chain に揃う (= branch protection 設計が単純化)。
+      gcp_secret_verify_project:
+        description: 'GCP project to verify against (e.g. cloudsql-sv). Empty = skip the verify job entirely.'
+        required: false
+        type: string
+        default: ''
+      gcp_secret_verify_provider:
+        description: 'WIF provider full resource name. Pass vars.GCP_WIF_PROVIDER from caller.'
+        required: false
+        type: string
+        default: ''
+      gcp_secret_verify_sa:
+        description: 'WIF impersonation target SA email. Reuse vars.GCP_WIF_SERVICE_ACCOUNT_STAGING etc (secretmanager.viewer role required).'
+        required: false
+        type: string
+        default: ''
+      gcp_secret_verify_ci_workflow_path:
+        description: 'cloud-run extraction path で参照する workflow file。default は本 caller の ci.yml。'
+        required: false
+        type: string
+        default: '.github/workflows/ci.yml'
 
 jobs:
   vet:
@@ -94,3 +120,27 @@ jobs:
           cache: true
           cache-dependency-path: ${{ inputs.working_directory }}/go.sum
       - run: go build ${{ inputs.build_args }}
+
+  # secret-verify は **vet/test/build が全部 success のあと**だけ走る。
+  # Secret Manager を叩いて gcloud quota を消費する前に local lint/test を
+  # 通しておく方針 (= rerun コスト最小化)。
+  # 3 つの opt-in input すべてが non-empty のとき以外は skip — 既存 caller
+  # への影響無し (default 値が空文字列で if 評価 false になるため backward
+  # compatible)。
+  secret-verify:
+    name: secret-verify
+    if: |
+      inputs.gcp_secret_verify_project != '' &&
+      inputs.gcp_secret_verify_provider != '' &&
+      inputs.gcp_secret_verify_sa != ''
+    needs: [vet, test, build]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/secret-verify-gcp.yml
+    with:
+      project: ${{ inputs.gcp_secret_verify_project }}
+      repo_type: cloud-run
+      workload_identity_provider: ${{ inputs.gcp_secret_verify_provider }}
+      service_account: ${{ inputs.gcp_secret_verify_sa }}
+      ci_workflow_path: ${{ inputs.gcp_secret_verify_ci_workflow_path }}

@@ -102,6 +102,46 @@ jobs:
 | `npm_publish_propagate_repos` | `''` | publish 後に自動更新する対象リポジトリ (カンマ区切り) |
 | `npm_publish_propagate_dirs` | `''` | 対象リポジトリの working directory (カンマ区切り) |
 
+### go-ci.yml
+
+Go 向け CI pipeline。`vet` / `test` / `build` の 3 job + (opt-in) `secret-verify` で構成される。status check 名は caller の job id (例: `ci`) + ' / ' + reusable job name で、`ci / vet`, `ci / test`, `ci / build`, `ci / secret-verify` の 4 つに pin される (auth-worker の `ippoan-go-default` branch-protection preset 参照)。
+
+#### Caller テンプレート (Go on Cloud Run、secret-verify あり)
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ippoan/ci-workflows/.github/workflows/go-ci.yml@main
+    with:
+      gcp_secret_verify_project: cloudsql-sv
+      gcp_secret_verify_provider: ${{ vars.GCP_WIF_PROVIDER }}
+      gcp_secret_verify_sa: ${{ vars.GCP_WIF_SERVICE_ACCOUNT_STAGING }}
+```
+
+3 つの verify input を全部空にすると `secret-verify` job は skip され、`vet/test/build` だけが status check に出る (= 既存 caller への backward compat)。
+
+### Secret verify を frontend-ci.yml / go-ci.yml の中に取り込む経緯
+
+旧 pattern: 各 caller repo が `.github/workflows/secret-verify.yml` を別 file で持ち、`ippoan/ci-workflows/.github/workflows/secret-verify-gcp.yml@main` を直接呼んでいた。問題:
+
+1. caller 毎の boilerplate (40 行前後) が必要
+2. status check の DAG が `ci / *` と `verify / *` の 2 並列 chain になり、branch protection の required-check 構成が複雑化
+3. typecheck / build がまだ赤い commit で Secret Manager を叩いて gcloud quota を浪費
+
+これを 2026-05 の `feat(ci): bake secret-verify into go-ci/frontend-ci` (PR #XX) で reusable 内に **直列に内製化**。caller は `gcp_secret_verify_*` 3 input を渡すだけで `ci / secret-verify` 段が serial で動く。`secret-verify-gcp.yml` 単体 caller も維持されるので柔軟な構成は残せる。
+
 ### tag-release.yml / dev-tag-release.yml
 
 リリースタグ自動採番の reusable 2 種:
