@@ -72,8 +72,9 @@ on:
       NODE_AUTH_TOKEN:
         description: |
           Token used as `NODE_AUTH_TOKEN` for `npm publish`. For GitHub
-          Packages within the same org pass `${{ secrets.GITHUB_TOKEN }}`.
-          For npmjs.org publishes pass a granular npm access token.
+          Packages within the same org pass the caller's `secrets.GITHUB_TOKEN`
+          (or `secrets.TAG_RELEASE_PAT` if cross-repo). For npmjs.org publishes
+          pass a granular npm access token.
         required: true
 
 jobs:
