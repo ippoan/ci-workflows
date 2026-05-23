@@ -141,10 +141,10 @@ on:
         type: string
         default: ''
       gcp_secret_verify_apply_labels:
-        description: 'Verify 成功後に GCP Secret Manager の secret に `used-by-<owner>-<repo>=active|removed` label を打つ。requires `secretmanager.secrets.update` on the verify SA. default false。'
+        description: 'Verify 成功後に GCP Secret Manager の secret に `used-by-<owner>-<repo>=active|removed` label を打つ。requires `secretmanager.secrets.update` on the verify SA (secretsInventoryLabeler role 等)。default true (secrets-inventory dashboard で active consumer を可視化する org 標準)。明示 false にすれば抑止可。'
         required: false
         type: boolean
-        default: false
+        default: true
     secrets:
       CLOUDFLARE_API_TOKEN:
         description: Cloudflare API token for wrangler deploy
