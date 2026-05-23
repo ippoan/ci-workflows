@@ -165,6 +165,8 @@ jobs:
           # Build the required_status_checks block dynamically. The Branches
           # API rejects an empty contexts[] array, so when the caller passes
           # no checks we omit the entire block by sending an explicit null.
+          # 2026-05 以降 GitHub API は object|null 型の field に空文字列を渡すと
+          # HTTP 422 を返すようになったため `-F field=null` (typed null) で送る。
           ARGS=()
           if [ -n "${REQUIRED_CHECKS// /}" ]; then
             ARGS+=( -F "required_status_checks[strict]=${STRICT}" )
@@ -175,13 +177,13 @@ jobs:
               ARGS+=( -F "required_status_checks[contexts][]=${line}" )
             done <<< "${REQUIRED_CHECKS}"
           else
-            ARGS+=( -f "required_status_checks=" )
+            ARGS+=( -F "required_status_checks=null" )
           fi
 
           ARGS+=(
             -F "enforce_admins=${ENFORCE_ADMINS}"
-            -f "required_pull_request_reviews="
-            -f "restrictions="
+            -F "required_pull_request_reviews=null"
+            -F "restrictions=null"
             -F "required_linear_history=${LINEAR}"
             -F "allow_force_pushes=${ALLOW_FORCE}"
             -F "allow_deletions=${ALLOW_DELETE}"
