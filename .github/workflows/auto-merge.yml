@@ -29,6 +29,13 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # `enablePullRequestAutoMerge` mutation が cross-repo reusable chain
+      # から呼ばれた github.token で 401 になる事象の workaround。
+      # cli/cli#11493 で actions:write 不足が misleading な 401 を出すケース
+      # が報告されている。先に actions:write を追加して試し、それでも 401
+      # が出るなら peter-evans/enable-pull-request-automerge action に
+      # 切り替える二段方針 (ci-dashboard#125 で再現)。
+      actions: write
     steps:
       - name: Check mergeable and queue squash merge
         env:
