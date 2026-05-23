@@ -9,6 +9,29 @@ name: Node Lib CI
 # --no-fund` so brand-new repos work before a lockfile lands. Library repos
 # are encouraged to commit a lockfile once stable for supply-chain hygiene.
 #
+# Dual-step auto-merge pattern (mirrors frontend-ci.yml / go-ci.yml):
+#   1. `disable-auto-merge` job at start: defense-in-depth that forcibly
+#      disables any existing auto-merge state when CI starts, so a stale
+#      merge queue can't fire before fresh CI passes.
+#   2. `auto-merge` job at end: after typecheck + test succeed, calls
+#      ci-workflows/auto-merge.yml which queues `gh pr merge --auto
+#      --squash`. GitHub then merges automatically when required_checks
+#      (typecheck + test) clear. This removes the need to run
+#      `gh pr merge --auto --squash` from the local CLI (which has
+#      well-known wrinkles around required-checks chicken/egg).
+#
+# Caller must declare these `permissions:` at top-level (Option A):
+#
+#   permissions:
+#     contents: write        # auto-merge job (merge to main)
+#     pull-requests: write   # disable-auto-merge + auto-merge jobs
+#     packages: read         # GitHub Packages dependency install
+#
+# Without `pull-requests: write` the disable-auto-merge job triggers
+# `startup_failure` at reusable-parse time and the entire workflow run
+# silently fails before any check fires (see ci-workflows CLAUDE.md
+# "startup_failure" troubleshoot).
+#
 # Typical caller (drops into a consumer repo's `.github/workflows/ci.yml`):
 #
 #   name: ci
@@ -16,17 +39,26 @@ name: Node Lib CI
 #     pull_request: {}
 #     push:
 #       branches: [main]
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#     packages: read
 #   jobs:
 #     ci:
 #       uses: ippoan/ci-workflows/.github/workflows/lib-ci.yml@main
 #       with:
 #         node_version: '20'
+#       secrets: inherit
 #
 # Required-check names produced by this workflow (for branch protection):
 #
 #   ci / typecheck
 #   ci / lint        (only emitted when lint is detected or run_lint=true)
 #   ci / test
+#
+# The `disable-auto-merge` and `auto-merge` jobs are intentionally **NOT**
+# in the required-checks set — they only run on PRs and would block push-
+# to-main otherwise. They are scaffolding around the real checks.
 
 on:
   workflow_call:
@@ -64,6 +96,29 @@ on:
         default: true
 
 jobs:
+  # Defense-in-depth: forcibly disable any existing auto-merge state at the
+  # very start of CI so a stale merge queue cannot fire before fresh CI
+  # passes. Idempotent (no-op if auto-merge is already off). Mirrors the
+  # `disable-auto-merge` job in `frontend-ci.yml` / `go-ci.yml`.
+  #
+  # Requires caller permissions: `pull-requests: write` (top-level or job-
+  # level). Without it the reusable parse step produces `startup_failure`
+  # and the run silently dies before any job starts.
+  disable-auto-merge:
+    name: Disable PR auto-merge (CI start)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Force-disable PR auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr merge --disable-auto "$PR_NUMBER" -R "$REPO" || true
+
   typecheck:
     name: typecheck
     runs-on: ubuntu-latest
@@ -165,3 +220,29 @@ jobs:
           else
             npm test
           fi
+
+  # Final step of the dual-step auto-merge pattern. Calls
+  # ci-workflows/auto-merge.yml which queues `gh pr merge --auto --squash`
+  # so GitHub fires the merge once required_checks (typecheck + test)
+  # clear. The `if:` guards ensure:
+  #   - PR event only (auto-merge has no meaning for push to main).
+  #   - PR is not a draft (drafts should not merge).
+  #   - typecheck + test succeeded (lint skipped is fine — it's optional).
+  # `always()` is required so this job runs even when an upstream job is
+  # skipped (e.g. lint auto-skip); without it the whole job is skipped by
+  # default propagation.
+  auto-merge:
+    name: Auto Merge
+    needs: [typecheck, lint, test]
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
+      needs.typecheck.result == 'success' &&
+      needs.test.result == 'success' &&
+      (needs.lint.result == 'success' || needs.lint.result == 'skipped')
+    uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+    secrets: inherit
