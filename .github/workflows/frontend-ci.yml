@@ -731,6 +731,137 @@ jobs:
   # workflow 全体が `startup_failure` になる (job 起動前にエラー、ログ出ず)。
   # caller の `jobs.<id>:` または top-level の `permissions:` で必ず
   # `id-token: write` を declare すること。詳細は本 repo CLAUDE.md。
+  # caller の wrangler が `secrets_store_secrets` を 1 つでも宣言している
+  # のに `gcp_secret_verify_*` opt-in が空のとき、secret-verify job が skip
+  # されて Secrets Store の整合が一切検証されないまま deploy される事故を
+  # 防ぐ gate。verify が opt-in (3 input が揃ってる) ときはこの gate 自体
+  # が skip される (= secret-verify が実際に走るので gate 不要)。
+  #
+  # wrangler が無い (= 非 worker) / `secrets_store_secrets` ゼロ件の repo は
+  # この gate を素通りする (= 既存 nuxt / Secrets Store 未使用 worker は無影響)。
+  secret-verify-required:
+    name: secret-verify-required
+    if: |
+      inputs.gcp_secret_verify_project == '' ||
+      inputs.gcp_secret_verify_provider == '' ||
+      inputs.gcp_secret_verify_sa == ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if wrangler declares secrets_store_secrets without verify opt-in
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory }}
+          WRANGLER_PATH: ${{ inputs.gcp_secret_verify_wrangler_path }}
+        run: |
+          set -euo pipefail
+          cd "$WORKING_DIRECTORY"
+          python3 <<'PY'
+          import json, os, re, sys
+          from pathlib import Path
+
+          wp = os.environ.get("WRANGLER_PATH", "").strip()
+          candidates = [Path(wp)] if wp else [
+              Path("wrangler.jsonc"),
+              Path("wrangler.json"),
+              Path("wrangler.toml"),
+          ]
+          target = next((c for c in candidates if c.exists()), None)
+          if target is None:
+              print("No wrangler config found; gate not applicable.")
+              sys.exit(0)
+
+          def strip_jsonc_comments(text):
+              out, i, in_str, q = [], 0, False, None
+              while i < len(text):
+                  ch = text[i]
+                  if in_str:
+                      out.append(ch)
+                      if ch == "\\" and i + 1 < len(text):
+                          out.append(text[i + 1]); i += 2; continue
+                      if ch == q:
+                          in_str = False
+                      i += 1; continue
+                  if ch == '"':
+                      in_str, q = True, ch
+                      out.append(ch); i += 1; continue
+                  if ch == "/" and i + 1 < len(text):
+                      nxt = text[i + 1]
+                      if nxt == "/":
+                          while i < len(text) and text[i] != "\n":
+                              i += 1
+                          continue
+                      if nxt == "*":
+                          i += 2
+                          while i + 1 < len(text) and not (text[i] == "*" and text[i + 1] == "/"):
+                              i += 1
+                          i += 2; continue
+                  out.append(ch); i += 1
+              return "".join(out)
+
+          def count_bindings(node):
+              n = 0
+              if isinstance(node, dict):
+                  v = node.get("secrets_store_secrets")
+                  if isinstance(v, list):
+                      n += sum(1 for x in v if isinstance(x, dict))
+                  for child in node.values():
+                      n += count_bindings(child)
+              elif isinstance(node, list):
+                  for item in node:
+                      n += count_bindings(item)
+              return n
+
+          ext = target.suffix.lower()
+          if ext in (".jsonc", ".json"):
+              raw = target.read_text(encoding="utf-8")
+              cleaned = re.sub(r",(\s*[}\]])", r"\1", strip_jsonc_comments(raw))
+              try:
+                  data = json.loads(cleaned)
+              except json.JSONDecodeError as e:
+                  print(f"::error file={target}::Failed to parse JSON: {e}", file=sys.stderr)
+                  sys.exit(1)
+          elif ext == ".toml":
+              try:
+                  import tomllib
+              except ImportError:
+                  print("::error::Python 3.11+ required for tomllib", file=sys.stderr)
+                  sys.exit(1)
+              with target.open("rb") as fh:
+                  data = tomllib.load(fh)
+          else:
+              print(f"::error::Unsupported wrangler config extension: {ext}", file=sys.stderr)
+              sys.exit(1)
+
+          count = count_bindings(data)
+          if count == 0:
+              print(f"{target}: no secrets_store_secrets bindings; gate clears.")
+              sys.exit(0)
+
+          msg = (
+              f"{target} declares {count} secrets_store_secrets binding(s) but the "
+              "frontend-ci.yml caller did not set gcp_secret_verify_project / "
+              "gcp_secret_verify_provider / gcp_secret_verify_sa. Secret-verify is "
+              "mandatory when Secrets Store is used."
+          )
+          print(f"::error file={target}::{msg}", file=sys.stderr)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a") as fh:
+                  fh.write("# ❌ secret-verify required\n\n")
+                  fh.write(f"{msg}\n\n")
+                  fh.write("Add these inputs to your `frontend-ci.yml` caller:\n\n")
+                  fh.write("```yaml\nwith:\n")
+                  fh.write("  gcp_secret_verify_project: cloudsql-sv\n")
+                  fh.write("  gcp_secret_verify_provider: ${{ vars.GCP_WIF_PROVIDER }}\n")
+                  fh.write("  gcp_secret_verify_sa: ${{ vars.GCP_WIF_SERVICE_ACCOUNT_STAGING }}\n")
+                  fh.write("  gcp_secret_verify_apply_labels: true  # optional\n")
+                  fh.write("```\n\n")
+                  fh.write("Also ensure caller permissions include `id-token: write`.\n")
+          sys.exit(1)
+          PY
+
   secret-verify:
     name: secret-verify
     if: |
@@ -752,7 +883,7 @@ jobs:
 
   deploy-staging:
     name: Deploy Staging
-    needs: [test, typecheck, integration-test, branch-protection, secret-verify]
+    needs: [test, typecheck, integration-test, branch-protection, secret-verify-required, secret-verify]
     if: >-
       always() &&
       inputs.has_deploy &&
@@ -763,6 +894,7 @@ jobs:
       needs.typecheck.result == 'success' &&
       (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
       (needs.branch-protection.result == 'success' || needs.branch-protection.result == 'skipped') &&
+      (needs.secret-verify-required.result == 'success' || needs.secret-verify-required.result == 'skipped') &&
       (needs.secret-verify.result == 'success' || needs.secret-verify.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
@@ -991,7 +1123,7 @@ jobs:
 
   auto-merge:
     name: Auto Merge
-    needs: [test, typecheck, integration-test, branch-protection, secret-verify, deploy-staging]
+    needs: [test, typecheck, integration-test, branch-protection, secret-verify-required, secret-verify, deploy-staging]
     if: >-
       always() &&
       github.event_name == 'pull_request' &&
@@ -1000,6 +1132,7 @@ jobs:
       needs.typecheck.result == 'success' &&
       (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
       (needs.branch-protection.result == 'success' || needs.branch-protection.result == 'skipped') &&
+      (needs.secret-verify-required.result == 'success' || needs.secret-verify-required.result == 'skipped') &&
       (needs.secret-verify.result == 'success' || needs.secret-verify.result == 'skipped') &&
       (needs.deploy-staging.result == 'success' || needs.deploy-staging.result == 'skipped')
     uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
