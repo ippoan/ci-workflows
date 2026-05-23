@@ -4,7 +4,21 @@ on:
   workflow_call:
     secrets:
       AUTO_MERGE_PAT:
-        description: 'PAT for merge to trigger subsequent workflows (falls back to GITHUB_TOKEN)'
+        description: |
+          Optional PAT (legacy name). If set, takes precedence over
+          `TAG_RELEASE_PAT`. Both fall back to `github.token` when unset.
+        required: false
+      TAG_RELEASE_PAT:
+        description: |
+          Org-standard PAT used across `tag-release.yml` /
+          `dev-tag-release.yml`. Recommended — set this once at org level
+          and `auto-merge.yml` picks it up automatically (no need to mint a
+          separate `AUTO_MERGE_PAT`). Required scopes: `repo` + `workflow`
+          (classic) or Contents/PR/Workflow Read-Write (fine-grained).
+          `workflow` scope is required to merge PRs that touch
+          `.github/workflows/**` — without it the merge mutation fails with
+          HTTP 401 "Bad credentials" even though `gh pr view` succeeds with
+          the same token (ippoan/mcp-cf-workers#3 で実害発生)。
         required: false
 
 jobs:
@@ -18,7 +32,9 @@ jobs:
     steps:
       - name: Check mergeable and queue squash merge
         env:
-          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || github.token }}
+          # Resolution order: AUTO_MERGE_PAT (legacy explicit) →
+          # TAG_RELEASE_PAT (org standard) → github.token (no workflow scope).
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || secrets.TAG_RELEASE_PAT || github.token }}
         run: |
           PR=${{ github.event.number }}
           REPO=${{ github.repository }}
