@@ -972,3 +972,10 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    # `secrets: inherit` is required so the nested auto-merge.yml sees the
+    # org-level `TAG_RELEASE_PAT` (which carries the `workflow` scope needed
+    # to merge PRs touching `.github/workflows/**`). Without inherit the
+    # nested call falls back to `github.token`, which lacks `workflow` scope
+    # and returns HTTP 401 "Bad credentials" from the merge mutation while
+    # leaving `gh pr view` working — see ippoan/mcp-cf-workers#3.
+    secrets: inherit
