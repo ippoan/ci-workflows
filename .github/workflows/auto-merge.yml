@@ -32,9 +32,7 @@ jobs:
     steps:
       - name: Check mergeable and queue squash merge
         env:
-          # Resolution order: AUTO_MERGE_PAT (legacy explicit) →
-          # TAG_RELEASE_PAT (org standard) → github.token (no workflow scope).
-          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || secrets.TAG_RELEASE_PAT || github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           PR=${{ github.event.number }}
           REPO=${{ github.repository }}
