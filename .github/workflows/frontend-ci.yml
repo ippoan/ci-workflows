@@ -84,7 +84,12 @@ on:
         type: boolean
         default: true
       npm_publish_directory:
-        description: 'Directory of npm package to publish (e.g. "packages/auth-client"). Empty = no publish.'
+        description: |
+          Directory of npm package(s) to publish. Accepts a single path
+          (e.g. `packages/auth-client`) or a comma-separated list for
+          monorepos with multiple packages (e.g.
+          `packages/auth-client,packages/auth-client-worker`). Each entry
+          must contain its own `package.json`. Empty = no publish.
         type: string
         default: ''
       npm_publish_name:
@@ -892,17 +897,33 @@ jobs:
           scope: ${{ inputs.npm_scope }}
 
       - name: Set dev version and publish
-        working-directory: ${{ inputs.npm_publish_directory }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_PUBLISH_DIRECTORY: ${{ inputs.npm_publish_directory }}
+          PR_NUMBER: ${{ github.event.number }}
         run: |
+          set -euo pipefail
           SHORT_SHA=$(git rev-parse --short HEAD)
-          VERSION="0.1.${{ github.event.number }}-dev.${SHORT_SHA}"
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-          echo "@ippoan:registry=https://npm.pkg.github.com" > .npmrc
-          echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" >> .npmrc
-          npm publish --tag dev
-          echo "### 📦 Published \`$(node -p "require('./package.json').name")@${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          # `npm_publish_directory` accepts a single path or a comma-separated
+          # list (monorepo). Loop and publish each. Each loop iteration uses
+          # its own working directory so the surrounding `working-directory:`
+          # has been moved into the step body.
+          IFS=',' read -ra DIRS <<<"$NPM_PUBLISH_DIRECTORY"
+          for RAW_DIR in "${DIRS[@]}"; do
+            DIR="$(echo "$RAW_DIR" | xargs)"  # trim surrounding whitespace
+            [ -z "$DIR" ] && continue
+            pushd "$GITHUB_WORKSPACE/$DIR" >/dev/null
+            # Dev tag versioning: `0.0.<PR>-dev.<SHA>`. Patch-only increment
+            # keeps the dev channel below any stable 0.1+ that has shipped
+            # to `latest`; `--tag dev` keeps the channels disjoint anyway.
+            VERSION="0.0.${PR_NUMBER}-dev.${SHORT_SHA}"
+            npm version "$VERSION" --no-git-tag-version --allow-same-version
+            echo "@ippoan:registry=https://npm.pkg.github.com" > .npmrc
+            echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" >> .npmrc
+            npm publish --tag dev
+            echo "### 📦 Published \`$(node -p "require('./package.json').name")@${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
+            popd >/dev/null
+          done
 
   publish-release:
     name: Publish Release
@@ -926,17 +947,30 @@ jobs:
           scope: ${{ inputs.npm_scope }}
 
       - name: Set release version and publish
-        working-directory: ${{ inputs.npm_publish_directory }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_PUBLISH_DIRECTORY: ${{ inputs.npm_publish_directory }}
         run: |
+          set -euo pipefail
           # Extract version from tag: v0.2.3 → 0.2.3
           VERSION="${GITHUB_REF_NAME#v}"
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-          echo "@ippoan:registry=https://npm.pkg.github.com" > .npmrc
-          echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" >> .npmrc
-          npm publish
-          echo "### 📦 Published \`$(node -p "require('./package.json').name")@${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          # `npm_publish_directory` accepts a single path or a comma-separated
+          # list. Loop and publish each — all packages share the same tag
+          # version (monorepo lock-step). Independent versioning per package
+          # would require per-package tags (e.g. `auth-client/v0.2.3`), which
+          # is out of scope here.
+          IFS=',' read -ra DIRS <<<"$NPM_PUBLISH_DIRECTORY"
+          for RAW_DIR in "${DIRS[@]}"; do
+            DIR="$(echo "$RAW_DIR" | xargs)"
+            [ -z "$DIR" ] && continue
+            pushd "$GITHUB_WORKSPACE/$DIR" >/dev/null
+            npm version "$VERSION" --no-git-tag-version --allow-same-version
+            echo "@ippoan:registry=https://npm.pkg.github.com" > .npmrc
+            echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" >> .npmrc
+            npm publish
+            echo "### 📦 Published \`$(node -p "require('./package.json').name")@${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
+            popd >/dev/null
+          done
 
   propagate:
     name: Propagate Package
