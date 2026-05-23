@@ -1,0 +1,167 @@
+name: Node Lib CI
+
+# Reusable CI for Node.js library packages published to GitHub Packages
+# (e.g. @ippoan/mcp-cf-workers). Runs typecheck + (optional) lint + test on
+# PR + push.
+#
+# Lockfile policy: if `package-lock.json` is committed, uses `npm ci` for
+# reproducible installs. Otherwise falls back to `npm install --no-audit
+# --no-fund` so brand-new repos work before a lockfile lands. Library repos
+# are encouraged to commit a lockfile once stable for supply-chain hygiene.
+#
+# Typical caller (drops into a consumer repo's `.github/workflows/ci.yml`):
+#
+#   name: ci
+#   on:
+#     pull_request: {}
+#     push:
+#       branches: [main]
+#   jobs:
+#     ci:
+#       uses: ippoan/ci-workflows/.github/workflows/lib-ci.yml@main
+#       with:
+#         node_version: '20'
+#
+# Required-check names produced by this workflow (for branch protection):
+#
+#   ci / typecheck
+#   ci / lint        (only emitted when lint is detected or run_lint=true)
+#   ci / test
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: 'Node.js version (passed to actions/setup-node).'
+        type: string
+        required: false
+        default: '20'
+      package_path:
+        description: |
+          Working directory containing `package.json`. Default `.` for
+          repos that put the package at the repo root. Set to a subpath
+          (e.g. `packages/foo`) for monorepo packages.
+        type: string
+        required: false
+        default: '.'
+      run_lint:
+        description: |
+          One of `auto` (default) | `true` | `false`.
+          - `auto`: emit the `lint` job + run `npm run lint` only if an
+            eslint config (`.eslintrc.*` / `eslint.config.*`) or a `lint`
+            npm script is present.
+          - `true`: always run `npm run lint`. Fails if missing.
+          - `false`: skip the lint job entirely (no check produced).
+        type: string
+        required: false
+        default: 'auto'
+      coverage:
+        description: |
+          If true and a `test:coverage` npm script exists, runs
+          `npm run test:coverage` instead of `npm test`. Default true.
+        type: boolean
+        required: false
+        default: true
+
+jobs:
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.package_path }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Install
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            echo "::notice::Using npm ci (lockfile present)"
+            npm ci
+          else
+            echo "::notice::No package-lock.json found — falling back to npm install"
+            npm install --no-audit --no-fund
+          fi
+      - name: Run typecheck
+        run: npm run typecheck
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    if: inputs.run_lint != 'false'
+    defaults:
+      run:
+        working-directory: ${{ inputs.package_path }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect lint config
+        id: detect
+        run: |
+          set -euo pipefail
+          mode='${{ inputs.run_lint }}'
+          if [ "$mode" = 'true' ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # mode == 'auto' (the != 'false' job-level if already filtered out 'false')
+          if grep -q '"lint"[[:space:]]*:' package.json 2>/dev/null \
+            || compgen -G '.eslintrc*' > /dev/null \
+            || compgen -G 'eslint.config.*' > /dev/null; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v4
+        if: steps.detect.outputs.should_run == 'true'
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Install
+        if: steps.detect.outputs.should_run == 'true'
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+      - name: Run lint
+        if: steps.detect.outputs.should_run == 'true'
+        run: npm run lint
+      - name: Skip note
+        if: steps.detect.outputs.should_run != 'true'
+        run: |
+          echo "lint skipped — no eslint config / no \`lint\` script detected"
+          echo "::notice::To force lint, pass \`run_lint: 'true'\` in the caller workflow."
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.package_path }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Install
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+      - name: Run tests
+        env:
+          COVERAGE: ${{ inputs.coverage }}
+        run: |
+          set -euo pipefail
+          if [ "$COVERAGE" = 'true' ] && grep -q '"test:coverage"[[:space:]]*:' package.json; then
+            npm run test:coverage
+          else
+            npm test
+          fi
