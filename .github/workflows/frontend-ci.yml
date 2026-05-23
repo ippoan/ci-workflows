@@ -104,23 +104,34 @@ on:
         description: 'Comma-separated working directories per repo (e.g. ".,.,web"). Must match propagate_repos order.'
         type: string
         default: ''
-      # ----- Optional opt-in: GCP secret-verify integration -----
+      # ----- GCP secret-verify integration -----
       # secret-verify-gcp.yml を本 reusable の中に直列 (test/typecheck の
-      # 後) で組み込むフック。caller (`test.yml`) が別 workflow を持たずに
-      # WIF vars を渡すだけで verify が `ci / secret-verify` として参加する。
-      # 3 つの input すべて non-empty のときだけ動く (= backward compat)。
+      # 後) で組み込むフック。
+      #
+      # **org vars があれば caller は何も渡さなくていい**:
+      #   - vars.GCP_PROJECT_ID_STAGING       → gcp_secret_verify_project の fallback
+      #   - vars.GCP_WIF_PROVIDER             → gcp_secret_verify_provider の fallback
+      #   - vars.GCP_WIF_SERVICE_ACCOUNT_STAGING → gcp_secret_verify_sa の fallback
+      #
+      # ippoan org は 4 vars (GCP_PROJECT_ID_STAGING / GCP_REGION /
+      # GCP_WIF_PROVIDER / GCP_WIF_SERVICE_ACCOUNT_STAGING) を org-level で
+      # 設定済 (visibility: Public repositories)。secret-verify は自動で動く。
+      #
+      # input を明示的に渡せば vars より優先 (= per-caller override 用)。
+      # vars も input も無くて wrangler に secrets_store_secrets binding が
+      # あるなら `secret-verify-required` gate で FAIL する。
       gcp_secret_verify_project:
-        description: 'GCP project to verify against (e.g. cloudsql-sv). Empty = skip the verify job entirely.'
+        description: 'GCP project to verify against. Empty = use vars.GCP_PROJECT_ID_STAGING. Both empty + binding present = gate fail.'
         required: false
         type: string
         default: ''
       gcp_secret_verify_provider:
-        description: 'WIF provider full resource name. Pass vars.GCP_WIF_PROVIDER from caller.'
+        description: 'WIF provider full resource name. Empty = use vars.GCP_WIF_PROVIDER.'
         required: false
         type: string
         default: ''
       gcp_secret_verify_sa:
-        description: 'WIF impersonation target SA email (verify 用、secretmanager.viewer role が必要)。'
+        description: 'WIF impersonation target SA email (secretmanager.viewer role 必要)。Empty = use vars.GCP_WIF_SERVICE_ACCOUNT_STAGING.'
         required: false
         type: string
         default: ''
@@ -742,15 +753,15 @@ jobs:
   secret-verify-required:
     name: secret-verify-required
     if: |
-      inputs.gcp_secret_verify_project == '' ||
-      inputs.gcp_secret_verify_provider == '' ||
-      inputs.gcp_secret_verify_sa == ''
+      (inputs.gcp_secret_verify_project == '' && vars.GCP_PROJECT_ID_STAGING == '') ||
+      (inputs.gcp_secret_verify_provider == '' && vars.GCP_WIF_PROVIDER == '') ||
+      (inputs.gcp_secret_verify_sa == '' && vars.GCP_WIF_SERVICE_ACCOUNT_STAGING == '')
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - name: Fail if wrangler declares secrets_store_secrets without verify opt-in
+      - name: Fail if wrangler declares secrets_store_secrets without verify config
         env:
           WORKING_DIRECTORY: ${{ inputs.working_directory }}
           WRANGLER_PATH: ${{ inputs.gcp_secret_verify_wrangler_path }}
@@ -840,9 +851,10 @@ jobs:
               sys.exit(0)
 
           msg = (
-              f"{target} declares {count} secrets_store_secrets binding(s) but the "
-              "frontend-ci.yml caller did not set gcp_secret_verify_project / "
-              "gcp_secret_verify_provider / gcp_secret_verify_sa. Secret-verify is "
+              f"{target} declares {count} secrets_store_secrets binding(s) but "
+              "neither the caller inputs (gcp_secret_verify_project/provider/sa) "
+              "nor the org vars (GCP_PROJECT_ID_STAGING / GCP_WIF_PROVIDER / "
+              "GCP_WIF_SERVICE_ACCOUNT_STAGING) are populated. Secret-verify is "
               "mandatory when Secrets Store is used."
           )
           print(f"::error file={target}::{msg}", file=sys.stderr)
@@ -851,34 +863,43 @@ jobs:
               with open(summary, "a") as fh:
                   fh.write("# ❌ secret-verify required\n\n")
                   fh.write(f"{msg}\n\n")
-                  fh.write("Add these inputs to your `frontend-ci.yml` caller:\n\n")
+                  fh.write("## Fix (recommended)\n\n")
+                  fh.write("Set the **org-level vars** once at the GitHub org "
+                           "settings — every consumer repo picks them up "
+                           "automatically with no caller change:\n\n")
+                  fh.write("| Var | Value (example) |\n")
+                  fh.write("|---|---|\n")
+                  fh.write("| `GCP_PROJECT_ID_STAGING` | `cloudsql-sv` |\n")
+                  fh.write("| `GCP_WIF_PROVIDER` | `projects/.../providers/github` |\n")
+                  fh.write("| `GCP_WIF_SERVICE_ACCOUNT_STAGING` | `staging-deploy@<project>.iam.gserviceaccount.com` |\n\n")
+                  fh.write("## Fix (per-caller override)\n\n")
                   fh.write("```yaml\nwith:\n")
                   fh.write("  gcp_secret_verify_project: cloudsql-sv\n")
-                  fh.write("  gcp_secret_verify_provider: ${{ vars.GCP_WIF_PROVIDER }}\n")
-                  fh.write("  gcp_secret_verify_sa: ${{ vars.GCP_WIF_SERVICE_ACCOUNT_STAGING }}\n")
+                  fh.write("  gcp_secret_verify_provider: <WIF provider full resource name>\n")
+                  fh.write("  gcp_secret_verify_sa: <verify SA email>\n")
                   fh.write("  gcp_secret_verify_apply_labels: true  # optional\n")
                   fh.write("```\n\n")
-                  fh.write("Also ensure caller permissions include `id-token: write`.\n")
+                  fh.write("Caller permissions must include `id-token: write`.\n")
           sys.exit(1)
           PY
 
   secret-verify:
     name: secret-verify
     if: |
-      inputs.gcp_secret_verify_project != '' &&
-      inputs.gcp_secret_verify_provider != '' &&
-      inputs.gcp_secret_verify_sa != ''
+      (inputs.gcp_secret_verify_project != '' || vars.GCP_PROJECT_ID_STAGING != '') &&
+      (inputs.gcp_secret_verify_provider != '' || vars.GCP_WIF_PROVIDER != '') &&
+      (inputs.gcp_secret_verify_sa != '' || vars.GCP_WIF_SERVICE_ACCOUNT_STAGING != '')
     needs: [test, typecheck, integration-test]
     permissions:
       contents: read
       id-token: write
     uses: ./.github/workflows/secret-verify-gcp.yml
     with:
-      project: ${{ inputs.gcp_secret_verify_project }}
+      project: ${{ inputs.gcp_secret_verify_project != '' && inputs.gcp_secret_verify_project || vars.GCP_PROJECT_ID_STAGING }}
       repo_type: worker
       wrangler_path: ${{ inputs.gcp_secret_verify_wrangler_path }}
-      workload_identity_provider: ${{ inputs.gcp_secret_verify_provider }}
-      service_account: ${{ inputs.gcp_secret_verify_sa }}
+      workload_identity_provider: ${{ inputs.gcp_secret_verify_provider != '' && inputs.gcp_secret_verify_provider || vars.GCP_WIF_PROVIDER }}
+      service_account: ${{ inputs.gcp_secret_verify_sa != '' && inputs.gcp_secret_verify_sa || vars.GCP_WIF_SERVICE_ACCOUNT_STAGING }}
       apply_labels: ${{ inputs.gcp_secret_verify_apply_labels }}
 
   deploy-staging:
