@@ -23,8 +23,17 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # 一時的: @main の auto-merge.yml が `actions: write` を要求する状態
+  # (PR #55 merged) になっているため、それを caller (本 file) でも宣言
+  # しないと parse 時 invalid になる。PR #56 (revert) merge 後は requirement
+  # が消えるが、本 declare は extra permission として残しても害なし。
+  actions: write
 
 jobs:
   auto-merge:
     uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
     secrets: inherit
