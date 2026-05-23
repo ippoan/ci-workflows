@@ -1,0 +1,117 @@
+name: Node Lib Publish
+
+# Reusable publish workflow for Node.js library packages targeting
+# GitHub Packages (e.g. @ippoan/mcp-cf-workers). Triggered by the caller on
+# tag push (`v*`) or `release: published`.
+#
+# Performs typecheck + test before `npm publish` so a broken release tag
+# never lands on the registry. Set `run_tests: false` to skip the gate (not
+# recommended).
+#
+# Caller must pass `NODE_AUTH_TOKEN` as a secret. For publishing to GitHub
+# Packages within the same org, `${{ secrets.GITHUB_TOKEN }}` is sufficient
+# as long as `permissions.packages: write` is granted at the caller (this
+# reusable also declares it on its own job, but the workflow_call envelope
+# can only widen — it cannot grant beyond what the caller delegates).
+#
+# Typical caller (drops into a consumer repo's
+# `.github/workflows/publish.yml`):
+#
+#   name: publish
+#   on:
+#     push:
+#       tags: ['v*']
+#   jobs:
+#     publish:
+#       permissions:
+#         contents: read
+#         packages: write
+#       uses: ippoan/ci-workflows/.github/workflows/lib-publish.yml@main
+#       with:
+#         node_version: '20'
+#       secrets:
+#         NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: 'Node.js version (passed to actions/setup-node).'
+        type: string
+        required: false
+        default: '20'
+      package_path:
+        description: 'Working directory containing `package.json`.'
+        type: string
+        required: false
+        default: '.'
+      registry_url:
+        description: 'npm registry URL.'
+        type: string
+        required: false
+        default: 'https://npm.pkg.github.com'
+      scope:
+        description: 'npm scope (e.g. `@ippoan`).'
+        type: string
+        required: false
+        default: '@ippoan'
+      run_tests:
+        description: |
+          Run `npm run typecheck` + `npm test` before publishing. Default
+          true. Set false only for emergency republishes when CI on the
+          source commit is already known-green.
+        type: boolean
+        required: false
+        default: true
+      publish_args:
+        description: 'Extra args appended to `npm publish`. e.g. `--tag beta`.'
+        type: string
+        required: false
+        default: ''
+    secrets:
+      NODE_AUTH_TOKEN:
+        description: |
+          Token used as `NODE_AUTH_TOKEN` for `npm publish`. For GitHub
+          Packages within the same org pass `${{ secrets.GITHUB_TOKEN }}`.
+          For npmjs.org publishes pass a granular npm access token.
+        required: true
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        working-directory: ${{ inputs.package_path }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          registry-url: ${{ inputs.registry_url }}
+          scope: ${{ inputs.scope }}
+      - name: Install
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+      - name: Typecheck
+        if: inputs.run_tests
+        run: npm run typecheck
+      - name: Test
+        if: inputs.run_tests
+        run: npm test
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+          PUBLISH_ARGS: ${{ inputs.publish_args }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          npm publish $PUBLISH_ARGS

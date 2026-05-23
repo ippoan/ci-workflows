@@ -188,6 +188,82 @@ jobs:
 
 > **caller 側で CI 完走後に auto-merge を enable したい場合**: caller workflow に `auto-merge` job を追加し `ippoan/ci-workflows/.github/workflows/auto-merge.yml@main` を呼ぶ (= frontend-ci.yml と同じ pattern を caller で組み立てる)。go-ci.yml には `auto-merge` job は embed されていない (= build / deploy job は caller 固有のため、caller の `needs:` から組む方が柔軟)。実例: `ippoan/secrets-inventory-gcp` の `ci.yml`。
 
+### lib-ci.yml
+
+Node.js library (e.g. `@ippoan/mcp-cf-workers`) 向け CI pipeline。`typecheck` / `lint` (auto-detect) / `test` の 3 job で構成され、status check 名は caller の job id (例: `ci`) + ` / ` + reusable job name で `ci / typecheck` / `ci / lint` / `ci / test`。auth-worker の `ippoan-lib-default` branch-protection preset は `ci / typecheck` + `ci / test` を required にピン留めしている (lint は auto-skip され得るため required から除外)。
+
+lockfile policy: `package-lock.json` が commit されていれば `npm ci`、無ければ `npm install --no-audit --no-fund` で auto-fallback。 brand-new repo (lockfile 未 commit) でも CI が green になる。
+
+#### Caller permissions (Option A 推奨)
+
+frontend-ci.yml と同じく `disable-auto-merge` (CI 開始時) + `auto-merge` (CI 完走後) を内蔵する dual-step pattern なので、caller 側で `contents: write` + `pull-requests: write` を declare する必要がある:
+
+```yaml
+# Option A: top-level (Recommended)
+permissions:
+  contents: write
+  pull-requests: write
+  packages: read       # @ippoan/* GitHub Packages dep install
+```
+
+#### Caller テンプレート (Node lib)
+
+```yaml
+name: ci
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: read
+
+jobs:
+  ci:
+    uses: ippoan/ci-workflows/.github/workflows/lib-ci.yml@main
+    with:
+      node_version: '20'
+      # run_lint: 'true'   # eslint config が必須化された後で
+      # package_path: 'packages/foo'  # monorepo の subpath
+    secrets: inherit
+```
+
+#### 主な inputs
+
+| input | デフォルト | 説明 |
+|-------|-----------|------|
+| `node_version` | `'20'` | actions/setup-node の node-version |
+| `package_path` | `'.'` | npm コマンドの作業 directory |
+| `run_lint` | `'auto'` | `auto` (eslint config / lint script を検出) \| `true` \| `false` |
+| `coverage` | `true` | `test:coverage` script があれば npm test の代わりに実行 |
+
+### lib-publish.yml
+
+`@ippoan/*` 系 Node.js library を GitHub Packages に publish する reusable。tag push (`v*`) または release published で caller から呼ぶ。 publish 前に `npm run typecheck` + `npm test` を gate として走らせる (`run_tests: false` で skip 可、緊急 republish 用)。
+
+```yaml
+# Caller (.github/workflows/publish.yml)
+name: publish
+on:
+  push:
+    tags: ['v*']
+jobs:
+  publish:
+    permissions:
+      contents: read
+      packages: write
+    uses: ippoan/ci-workflows/.github/workflows/lib-publish.yml@main
+    with:
+      node_version: '20'
+    secrets:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+`NODE_AUTH_TOKEN` は同 org 内 publish なら `${{ secrets.GITHUB_TOKEN }}` で足りる。 npmjs.org publish に切り替える場合は granular npm access token を caller secret として渡す + `registry_url: 'https://registry.npmjs.org'` も合わせて override。
+
+
 ### Secret verify を frontend-ci.yml / go-ci.yml の中に取り込む経緯
 
 旧 pattern: 各 caller repo が `.github/workflows/secret-verify.yml` を別 file で持ち、`ippoan/ci-workflows/.github/workflows/secret-verify-gcp.yml@main` を直接呼んでいた。問題:
