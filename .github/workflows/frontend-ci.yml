@@ -1070,6 +1070,15 @@ jobs:
             # keeps the dev channel below any stable 0.1+ that has shipped
             # to `latest`; `--tag dev` keeps the channels disjoint anyway.
             VERSION="0.0.${PR_NUMBER}-dev.${SHORT_SHA}"
+            PKG_NAME=$(node -p "require('./package.json').name")
+            # rerun 耐性: 既に同 SHA で publish 済なら skip (409 Conflict 回避)。
+            # PR の同一 commit に対して何回 rerun しても idempotent。
+            if npm view "${PKG_NAME}@${VERSION}" version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+              echo "::notice ::Already published ${PKG_NAME}@${VERSION} (rerun no-op)"
+              echo "### ⏭ Skipped \`${PKG_NAME}@${VERSION}\` (already published)" >> "$GITHUB_STEP_SUMMARY"
+              popd >/dev/null
+              continue
+            fi
             npm version "$VERSION" --no-git-tag-version --allow-same-version
             echo "@ippoan:registry=https://npm.pkg.github.com" > .npmrc
             echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" >> .npmrc
