@@ -67,6 +67,14 @@ on:
           は monorepo-wide な無 prefix release が占有する想定)。
         type: string
         default: ''
+      version_prefix:
+        description: |
+          Optional literal inserted between `prefix` and the semver. Default
+          `v` (= 既存挙動: `<prefix>v{semver}`)。 空文字を渡すと `v` を入れ
+          ない `<prefix>{semver}` 形式になる (例: `dev-0.0.2`)。 mcp-cf-workers
+          の dev release で `dev-{semver}` を採番するために導入。
+        type: string
+        default: 'v'
     secrets:
       TAG_RELEASE_PAT:
         description: |
@@ -104,17 +112,18 @@ jobs:
         env:
           BUMP: ${{ inputs.bump }}
           PREFIX: ${{ inputs.prefix }}
+          VERSION_PREFIX: ${{ inputs.version_prefix }}
         run: |
           set -euo pipefail
           git fetch --tags
-          # scan `<prefix>v*` (prefix が空なら従来通り `v*`)。
-          LATEST=$(git tag -l "${PREFIX}v*" --sort=-v:refname | head -1)
+          # scan `<prefix><version_prefix>*` (default は `<prefix>v*`)。
+          LATEST=$(git tag -l "${PREFIX}${VERSION_PREFIX}*" --sort=-v:refname | head -1)
 
           if [ -z "$LATEST" ]; then
             MAJOR=0; MINOR=0; PATCH=0
           else
-            # prefix を剥がしてから `v` も剥がして semver 取り出し。
-            VERSION="${LATEST#${PREFIX}v}"
+            # prefix を剥がしてから version_prefix も剥がして semver 取り出し。
+            VERSION="${LATEST#${PREFIX}${VERSION_PREFIX}}"
             IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
           fi
 
@@ -124,7 +133,7 @@ jobs:
             patch) PATCH=$((PATCH + 1)) ;;
           esac
 
-          NEW_TAG="${PREFIX}v${MAJOR}.${MINOR}.${PATCH}"
+          NEW_TAG="${PREFIX}${VERSION_PREFIX}${MAJOR}.${MINOR}.${PATCH}"
           SHORT_SHA="$(git rev-parse --short HEAD)"
           echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
           echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
