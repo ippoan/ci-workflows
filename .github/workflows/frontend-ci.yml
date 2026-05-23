@@ -885,7 +885,15 @@ jobs:
 
   secret-verify:
     name: secret-verify
-    if: |
+    # `always()` で needs 中の `skipped` (例: has_integration=false の
+    # integration-test) を許容する。これが無いと GitHub Actions の default
+    # 動作で needs に skip が混ざった瞬間 dependency-skip cascade で本 job
+    # も skipped になり、`if:` 評価すらされず verify が動かない。
+    if: >-
+      always() &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      needs.typecheck.result == 'success' &&
+      (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
       (inputs.gcp_secret_verify_project != '' || vars.GCP_PROJECT_ID_STAGING != '') &&
       (inputs.gcp_secret_verify_provider != '' || vars.GCP_WIF_PROVIDER != '') &&
       (inputs.gcp_secret_verify_sa != '' || vars.GCP_WIF_SERVICE_ACCOUNT_STAGING != '')
