@@ -150,7 +150,7 @@ jobs:
 | `post_install_script` | `''` | install 後のスクリプト |
 | `deploy_staging_script` | `''` | staging デプロイスクリプト |
 | `deploy_release_script` | `''` | リリースデプロイスクリプト |
-| `npm_publish_directory` | `''` | npm パッケージディレクトリ (設定時に publish 有効) |
+| `npm_publish_directory` | `''` | npm パッケージディレクトリ (設定時に publish 有効)。**comma-separated 対応** — `'packages/auth-client,packages/auth-client-worker'` のように複数 path 指定で全 package を 1 回の CI で publish。dev publish 版は全 package が `0.0.<PR>-dev.<SHA>` 共通、release tag publish は tag バージョン共通 (lock-step、独立 versioning 不可) |
 | `npm_publish_name` | `''` | npm パッケージ名 (propagation 用、例: `@ippoan/auth-client`) |
 | `npm_publish_propagate_repos` | `''` | publish 後に自動更新する対象リポジトリ (カンマ区切り) |
 | `npm_publish_propagate_dirs` | `''` | 対象リポジトリの working directory (カンマ区切り) |
