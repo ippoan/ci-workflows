@@ -32,7 +32,25 @@ jobs:
     steps:
       - name: Check mergeable and queue squash merge
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Prefer PAT (AUTO_MERGE_PAT alias > TAG_RELEASE_PAT canonical) when
+          # the caller passes one — that makes the resulting merge commit
+          # `push: main` event a non-GITHUB_TOKEN actor, which IS allowed to
+          # trigger downstream workflows (release.yml chain, post-merge
+          # `pull_request: closed` jobs, etc).
+          #
+          # Without this, `gh pr merge --auto` queues the merge under
+          # GITHUB_TOKEN, the auto-merge engine pushes the merge commit as
+          # github-actions[bot], and the resulting push / closed events are
+          # silently dropped by Actions ("GITHUB_TOKEN events do not trigger
+          # workflows"). This was the silent skip observed for
+          # ippoan/mcp-relay-rs#22 / #24 merges (dev-release.yml not firing,
+          # see ippoan/mcp-relay-rs#21).
+          #
+          # Falls back to `github.token` if neither PAT secret is set, so
+          # callers that genuinely don't have / want a PAT keep working
+          # (they just lose the downstream-workflow chain — same as old
+          # behavior).
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || secrets.TAG_RELEASE_PAT || github.token }}
         run: |
           PR=${{ github.event.number }}
           REPO=${{ github.repository }}
