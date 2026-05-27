@@ -159,6 +159,26 @@ jobs:
 
 Go 向け CI pipeline。`vet` / `test` / `build` の 3 job + (opt-in) `secret-verify` で構成される。status check 名は caller の job id (例: `ci`) + ' / ' + reusable job name で、`ci / vet`, `ci / test`, `ci / build`, `ci / secret-verify` の 4 つに pin される (auth-worker の `ippoan-go-default` branch-protection preset 参照)。
 
+#### Coverage 100% gate (opt-in、auto-detect)
+
+caller repo の **`coverage_100.toml`** が working_directory に存在すれば、`test` job が `go test ... -coverprofile=cover.out` を生成し、`go tool cover -func` 出力と toml を突合して **registered file の (exclude_funcs 以外の) 全 function が 100% カバレッジ** であることを CI で gate する。1 つでも違反すれば fail (warning ではない)。
+
+`coverage_100.toml` の最小例:
+
+```toml
+[main.go]
+# log.Fatal を含む env validation / ListenAndServe bootstrap を逃がす
+exclude_funcs = ["main", "mustEnv"]
+
+[cloudrun.go]
+exclude_funcs = ["newLiveCloudRun"]
+```
+
+- section 名 (`[<file>]`) は **working_directory からの相対パス** で書く (例: `main.go` / `sub/foo.go`)。`go tool cover -func` の module-fullpath とは suffix match で照合される
+- `exclude_funcs` は 100% 要求から除外する function 名のリスト。bootstrap / ADC 取得 / `log.Fatal` 等の untestable な path 用
+- ファイルが存在しなければ既存挙動 (plain `go test`) — backward compat
+- gate は `staging = 本番運用` repo (例: `release-wave-gcp`、`secrets-inventory-gcp`) で導入する想定。registered file の coverage 退化は staging 反映 (= 本番反映) ブロック扱い
+
 #### Caller テンプレート (Go on Cloud Run、secret-verify あり)
 
 ```yaml
