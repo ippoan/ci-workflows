@@ -138,7 +138,132 @@ jobs:
           go-version-file: ${{ inputs.working_directory }}/${{ inputs.go_version_file }}
           cache: true
           cache-dependency-path: ${{ inputs.working_directory }}/go.sum
-      - run: go test ${{ inputs.test_args }}
+      # coverage_100.toml が working_directory に存在すれば coverprofile を取り、
+      # 後段の `coverage-100-check` step で 100% gate にかける。存在しなければ
+      # 既存挙動 (plain `go test ${test_args}`) のまま。
+      - name: go test (with coverage when gate exists)
+        id: gotest
+        env:
+          # inputs.test_args は caller workflow 側で宣言される static string。
+          # `eval` ではなく shell word splitting (unquoted $TEST_ARGS) で展開する
+          # ことで意図しない command 実行 (e.g. `$(...)` / `;`) を回避する。
+          TEST_ARGS: ${{ inputs.test_args }}
+        run: |
+          set -euo pipefail
+          if [ -f coverage_100.toml ]; then
+            echo "coverage_100.toml detected — generating coverprofile for gate check"
+            # shellcheck disable=SC2086  # 意図的に word splitting
+            go test $TEST_ARGS -coverprofile=cover.out
+            echo "have_profile=true" >> "$GITHUB_OUTPUT"
+          else
+            # shellcheck disable=SC2086
+            go test $TEST_ARGS
+            echo "have_profile=false" >> "$GITHUB_OUTPUT"
+          fi
+      # 100% gate: coverage_100.toml に列挙された file の registered function が
+      # 全部 100% カバー されているか確認。exclude_funcs に列挙した function は
+      # 要求から除外 (= bootstrap / ADC fetch / log.Fatal 等の untestable な
+      # path を逃がす)。
+      #
+      # gate が fail した場合は CI fail。warning ではなく block。staging=prod
+      # 運用前提 (= 各 service が staging に出る = 本番反映) なので、CI green
+      # = 100% カバー維持を強制する。
+      - name: coverage 100% gate
+        if: steps.gotest.outputs.have_profile == 'true'
+        run: |
+          set -euo pipefail
+          go tool cover -func=cover.out > cover.func.txt
+          python3 - <<'PY'
+          import re, sys, os
+
+          # ---- 1) coverage_100.toml を簡易パース ----
+          # 期待する format:
+          #   [file/path.go]
+          #   exclude_funcs = ["FuncA", "FuncB"]
+          #
+          # 厳密な TOML parser は使わず、本 gate に必要な subset だけ正規表現で取る。
+          # caller が複雑な TOML を書いた場合は読み落とすが、gate の目的 (= 登録 file
+          # の 100% 確認) には十分。
+          with open("coverage_100.toml", encoding="utf-8") as f:
+              text = f.read()
+
+          registered = {}   # path -> set of excluded func names
+          current_file = None
+          for raw in text.splitlines():
+              line = raw.split("#", 1)[0].rstrip()
+              if not line.strip():
+                  continue
+              m_sec = re.match(r"^\[([^\]]+)\]\s*$", line)
+              if m_sec:
+                  current_file = m_sec.group(1).strip().strip('"')
+                  registered.setdefault(current_file, set())
+                  continue
+              m_ex = re.match(r"^\s*exclude_funcs\s*=\s*\[(.*)\]\s*$", line)
+              if m_ex and current_file:
+                  for n in re.findall(r'"([^"]+)"', m_ex.group(1)):
+                      registered[current_file].add(n)
+                  continue
+              # それ以外の行は本 gate では無視
+
+          if not registered:
+              print("coverage_100.toml has no [<file>] sections — nothing to check.")
+              sys.exit(0)
+
+          # ---- 2) go tool cover -func の出力を per-(file, func) pct に分解 ----
+          # 行 format (空白区切り):
+          #   <module/path/file.go>:<line>:\t<funcName>\t<pct>%
+          # 例:
+          #   github.com/foo/bar/main.go:40:	main	0.0%
+          func_re = re.compile(r"^(\S+\.go):\d+:\s+(\S+)\s+([\d.]+)%\s*$")
+          uncovered = {}   # registered_path -> list of (func, pct)
+          # registered file の path は repo-relative (例: "main.go"、"sub/foo.go")。
+          # go tool cover の出力は module-fullpath ("github.com/x/y/main.go") なので、
+          # registered path で suffix match する。
+          with open("cover.func.txt", encoding="utf-8") as f:
+              for line in f:
+                  m = func_re.match(line.rstrip())
+                  if not m:
+                      continue
+                  full_path, fname, pct_s = m.group(1), m.group(2), m.group(3)
+                  pct = float(pct_s)
+                  for reg_path, excludes in registered.items():
+                      # suffix match (前方の module/dir 差分を吸収)
+                      if full_path == reg_path or full_path.endswith("/" + reg_path):
+                          if fname in excludes:
+                              continue
+                          if pct < 100.0:
+                              uncovered.setdefault(reg_path, []).append((fname, pct))
+
+          # ---- 3) 結果 ----
+          # registered だが cover.func.txt に 1 行も無い場合 → file 自体が
+          # build に含まれていないか名前 typo。これも fail にする。
+          matched = set()
+          with open("cover.func.txt", encoding="utf-8") as f:
+              for line in f:
+                  m = func_re.match(line.rstrip())
+                  if not m:
+                      continue
+                  full_path = m.group(1)
+                  for reg_path in registered.keys():
+                      if full_path == reg_path or full_path.endswith("/" + reg_path):
+                          matched.add(reg_path)
+
+          missing = [p for p in registered.keys() if p not in matched]
+
+          if not uncovered and not missing:
+              print("coverage 100% gate: OK ({} file(s) registered)".format(len(registered)))
+              sys.exit(0)
+
+          print("::group::coverage 100% gate FAILED")
+          for path, items in uncovered.items():
+              print("::error file=" + path + "::below 100% coverage:")
+              for fname, pct in items:
+                  print("  - {}: {}%".format(fname, pct))
+          for path in missing:
+              print("::error file=" + path + "::registered in coverage_100.toml but not found in cover.func.txt")
+          print("::endgroup::")
+          sys.exit(1)
+          PY
 
   build:
     name: build
