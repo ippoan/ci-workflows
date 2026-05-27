@@ -327,7 +327,26 @@ jobs:
 
 - `RELEASE_WAVE_WEBHOOK_SECRET` (org secret、ci-dashboard の Secrets Store と同値)
 - `CLOUDFLARE_API_TOKEN` (cloudflare-workers platform の場合)
-- GCP WIF vars (cloudrun platform の場合、Phase 4c 以降)
+- `RELEASE_WAVE_GCP_API_KEY` (cloudrun platform、release-wave-gcp Cloud Run service の認証 key)
+
+#### Cloud Run path (Phase 4c)
+
+cloudrun platform の repo (e.g. `ippoan/rust-alc-api`) で:
+
+- **Stage**: tag push のみ実施。実 deploy は repo の `deploy.yml` に任せる
+  (= `--no-traffic --tag pending-<sanitized>` オプション付きで revision を
+  落とす必要あり、Phase 5 で各 repo deploy.yml に追加する)。
+  reusable は `release-wave-gcp /cloudrun/stage-check` を 30s 間隔で
+  20 分 poll し、`terminalCondition.state == "CONDITION_SUCCEEDED"` を待つ。
+- **Flip**: `services[]` 全てに対して matrix で並列に
+  `release-wave-gcp /cloudrun/flip-traffic` を叩く。`to_revision_tag` は
+  `pending-<sanitized target_tag>` を生成 (lowercase + dot → hyphen)。
+- **Rollback**: `services[]` 並列で `/cloudrun/rollback`。戻し先 revision
+  は `client_payload.rollback_target[<service>]` から取得 (ci-dashboard
+  側 dispatcher 実装時に各 service 別の flip_from_revision を載せる)。
+
+reusable input `release_wave_gcp_base_url` で release-wave-gcp の URL を
+上書き可能 (default は staging)。
 
 #### Security notes
 
