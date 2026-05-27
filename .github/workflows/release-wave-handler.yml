@@ -1,0 +1,449 @@
+name: Release Wave Handler
+
+# ippoan/ci-dashboard#137 Phase 4b で導入する reusable workflow。
+#
+# 各 release-wave 参加 repo の `.github/workflows/release-wave.yml` から
+# `uses:` で呼ばれる。`repository_dispatch` で ci-dashboard が送る 3 event
+# (release-wave-stage / -flip / -rollback) を受けて platform 別の deploy
+# 操作を行い、結果を `https://ci-dashboard.ippoan.org/webhooks/release-wave/*`
+# に POST する。
+#
+# Caller (`.github/workflows/release-wave.yml`) 例:
+#
+#   on:
+#     repository_dispatch:
+#       types:
+#         - release-wave-stage
+#         - release-wave-flip
+#         - release-wave-rollback
+#
+#   permissions:
+#     contents: write
+#     id-token: write   # GCP WIF (cloudrun の場合のみ必須、宣言は常時 OK)
+#
+#   jobs:
+#     handler:
+#       uses: ippoan/ci-workflows/.github/workflows/release-wave-handler.yml@main
+#       secrets: inherit
+#
+# client_payload (ci-dashboard が送る) shape:
+#   {
+#     "wave_id":     "wave_2026_05_27_01",
+#     "target_tag":  "v1.42.0",
+#     "head_sha":    "abcd1234...",
+#     "callback_url": "https://ci-dashboard.ippoan.org"   // optional override
+#   }
+
+on:
+  workflow_call:
+    inputs:
+      callback_base_url:
+        description: 'ci-dashboard host (default = production)'
+        required: false
+        type: string
+        default: 'https://ci-dashboard.ippoan.org'
+      targets_yaml_ref:
+        description: 'ci-workflows ref to fetch release-wave-targets.yaml from'
+        required: false
+        type: string
+        default: 'main'
+
+permissions:
+  contents: write       # tag push
+  id-token: write       # GCP WIF (cloudrun path 用、宣言だけしておく)
+
+jobs:
+  # =========================================================================
+  # dispatch: client_payload を parse + targets.yaml lookup
+  # =========================================================================
+  dispatch:
+    name: Parse dispatch + lookup targets
+    runs-on: ubuntu-latest
+    outputs:
+      event_type:           ${{ steps.parse.outputs.event_type }}
+      wave_id:              ${{ steps.parse.outputs.wave_id }}
+      target_tag:           ${{ steps.parse.outputs.target_tag }}
+      head_sha:             ${{ steps.parse.outputs.head_sha }}
+      platform:             ${{ steps.lookup.outputs.platform }}
+      cf_worker_name:       ${{ steps.lookup.outputs.cf_worker_name }}
+      cf_account_id:        ${{ steps.lookup.outputs.cf_account_id }}
+      preview_hostname:     ${{ steps.lookup.outputs.preview_hostname }}
+      gcp_project:          ${{ steps.lookup.outputs.gcp_project }}
+      gcp_region:           ${{ steps.lookup.outputs.gcp_region }}
+      services_json:        ${{ steps.lookup.outputs.services_json }}
+      monorepo_units_json:  ${{ steps.lookup.outputs.monorepo_units_json }}
+    steps:
+      # client_payload は **attacker controllable** (= repository_dispatch
+      # 経由で送られる任意 JSON)。env 経由で受けて parse + strict 形式検証する。
+      #
+      # 重要: head_sha / target_tag は後段で `actions/checkout` の `ref:` に
+      # 渡るため、攻撃者が `;` `&` `..` などを混ぜると arbitrary code execution
+      # に繋がり得る。**必ず**正規表現で形式検証してから output する。
+      - name: Parse + validate client_payload
+        id: parse
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+
+          # event_type は repository_dispatch の types[] から GitHub が
+          # set する値なので任意ではないが、念のため allowlist check。
+          case "$EVENT_ACTION" in
+            release-wave-stage|release-wave-flip|release-wave-rollback) ;;
+            *)
+              echo "::error::unknown event action: $EVENT_ACTION"
+              exit 1 ;;
+          esac
+          echo "event_type=$EVENT_ACTION" >> "$GITHUB_OUTPUT"
+
+          # jq で payload から各 field を取り出す。空 / 不在は空文字。
+          wave_id=$(printf '%s' "$PAYLOAD"   | jq -r '.wave_id    // ""')
+          target_tag=$(printf '%s' "$PAYLOAD" | jq -r '.target_tag // ""')
+          head_sha=$(printf '%s' "$PAYLOAD"   | jq -r '.head_sha   // ""')
+
+          # 必須 field 不在は即 fail
+          if [[ -z "$wave_id" || -z "$target_tag" ]]; then
+            echo "::error::client_payload missing required field (wave_id / target_tag)"
+            exit 1
+          fi
+
+          # ---- 形式検証 (ref injection 防止) ----
+          # wave_id: 英数 + - + _ + . のみ、最大 128 文字
+          if ! [[ "$wave_id" =~ ^[a-zA-Z0-9._-]{1,128}$ ]]; then
+            echo "::error::wave_id has invalid format: must match ^[a-zA-Z0-9._-]{1,128}\$"
+            exit 1
+          fi
+          # target_tag: semantic-version like (v?<digit/letter/.>+ で 64 文字以内)
+          # `..` `/` `;` `&` `\$` `\`` `(` などを排除
+          if ! [[ "$target_tag" =~ ^v?[a-zA-Z0-9._-]{1,64}$ ]]; then
+            echo "::error::target_tag has invalid format: must match ^v?[a-zA-Z0-9._-]{1,64}\$"
+            exit 1
+          fi
+          # head_sha: 完全 40 char hex の git commit SHA
+          # 空でも許容 (= optional)。指定された場合のみ厳密検証。
+          if [[ -n "$head_sha" ]] && ! [[ "$head_sha" =~ ^[a-f0-9]{7,40}$ ]]; then
+            echo "::error::head_sha has invalid format: must match ^[a-f0-9]{7,40}\$"
+            exit 1
+          fi
+
+          echo "wave_id=$wave_id"       >> "$GITHUB_OUTPUT"
+          echo "target_tag=$target_tag" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha"     >> "$GITHUB_OUTPUT"
+
+      # ci-workflows の config/release-wave-targets.yaml を sparse-checkout。
+      # 同 repo 内 reusable だが、calling workflow context では他 path に
+      # アクセスできないため明示 checkout が必要。
+      - name: Fetch release-wave-targets.yaml
+        uses: actions/checkout@v4
+        with:
+          repository: ippoan/ci-workflows
+          ref: ${{ inputs.targets_yaml_ref }}
+          path: _ci-workflows
+          sparse-checkout: |
+            config/release-wave-targets.yaml
+          sparse-checkout-cone-mode: false
+
+      - name: Install yq
+        run: |
+          set -euo pipefail
+          if ! command -v yq >/dev/null 2>&1; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+          yq --version
+
+      - name: Lookup target config for ${{ github.repository }}
+        id: lookup
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          CFG=_ci-workflows/config/release-wave-targets.yaml
+          if [[ ! -f "$CFG" ]]; then
+            echo "::error::missing $CFG"
+            exit 1
+          fi
+          # entry が無ければ explicit fail (= 設定漏れを早期検知)
+          if ! yq -e ".targets[\"$REPO\"]" "$CFG" >/dev/null; then
+            echo "::error::$REPO is not registered in $CFG (add an entry first)"
+            exit 1
+          fi
+          platform=$(yq ".targets[\"$REPO\"].platform // \"\"" "$CFG")
+          echo "platform=$platform" >> "$GITHUB_OUTPUT"
+          echo "cf_worker_name=$(yq      ".targets[\"$REPO\"].cf_worker_name   // \"\"" "$CFG")" >> "$GITHUB_OUTPUT"
+          echo "cf_account_id=$(yq       ".targets[\"$REPO\"].cf_account_id    // \"\"" "$CFG")" >> "$GITHUB_OUTPUT"
+          echo "preview_hostname=$(yq    ".targets[\"$REPO\"].preview_hostname // \"\"" "$CFG")" >> "$GITHUB_OUTPUT"
+          echo "gcp_project=$(yq         ".targets[\"$REPO\"].gcp_project      // \"\"" "$CFG")" >> "$GITHUB_OUTPUT"
+          echo "gcp_region=$(yq          ".targets[\"$REPO\"].gcp_region       // \"\"" "$CFG")" >> "$GITHUB_OUTPUT"
+          # services / monorepo_units は JSON 配列で串刺し
+          echo "services_json=$(yq -o=json -I0     ".targets[\"$REPO\"].services       // []" "$CFG")" >> "$GITHUB_OUTPUT"
+          echo "monorepo_units_json=$(yq -o=json -I0 ".targets[\"$REPO\"].monorepo_units // []" "$CFG")" >> "$GITHUB_OUTPUT"
+
+  # =========================================================================
+  # stage (cloudflare-workers): wrangler versions upload + preview URL
+  # =========================================================================
+  stage-cloudflare-workers:
+    name: Stage (cloudflare-workers)
+    needs: dispatch
+    if: needs.dispatch.outputs.event_type == 'release-wave-stage' && needs.dispatch.outputs.platform == 'cloudflare-workers'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.dispatch.outputs.head_sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm ci
+
+      # tag を打って push。これが「stage された code の immutable ref」になる
+      # ので flip 時に再 checkout で参照される。
+      - name: Tag + push
+        env:
+          TARGET_TAG: ${{ needs.dispatch.outputs.target_tag }}
+        run: |
+          set -euo pipefail
+          git config user.email "release-wave@ippoan.org"
+          git config user.name "Release Wave"
+          # idempotent: 同 tag が既に存在しても fail させない (= retry-friendly)
+          if ! git rev-parse "$TARGET_TAG" >/dev/null 2>&1; then
+            git tag "$TARGET_TAG"
+            git push origin "$TARGET_TAG"
+          fi
+
+      # wrangler versions upload (no-traffic deploy)。stdout から Version ID
+      # を抽出して preview URL の生成と flip ステップへ渡す。
+      - name: wrangler versions upload (no-traffic stage)
+        id: stage
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ needs.dispatch.outputs.cf_account_id }}
+        run: |
+          set -euo pipefail
+          OUT=$(npx wrangler versions upload 2>&1)
+          echo "$OUT"
+          VERSION_ID=$(printf '%s' "$OUT" | grep -oiE 'Version ID:[[:space:]]+[a-f0-9-]+' | tail -1 | awk '{print $NF}')
+          if [[ -z "$VERSION_ID" ]]; then
+            echo "::error::could not parse Version ID from wrangler output"
+            exit 1
+          fi
+          echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
+
+      # Preview URL は wrangler 既定の version preview URL を採用。
+      # https://<8 char prefix>-<worker>.<subdomain>.workers.dev
+      # subdomain が無い repo は preview_hostname を fallback で使う (= 操作者は
+      # /release-wave/<wave_id> から hostname を確認、CF Access policy が
+      # preview-* に被さっていれば認証経由でアクセスできる)。
+      - name: Compose preview URL
+        id: preview
+        env:
+          VERSION_ID: ${{ steps.stage.outputs.version_id }}
+          PREVIEW_HOSTNAME: ${{ needs.dispatch.outputs.preview_hostname }}
+        run: |
+          set -euo pipefail
+          # 第一候補: preview_hostname (CF Access wildcard for preview-*.ippoan.org)
+          # 第二候補: workers.dev version URL (subdomain 必要)
+          PREVIEW_URL="https://${PREVIEW_HOSTNAME}"
+          echo "preview_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Callback stage-report
+        env:
+          WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
+          REPO: ${{ github.repository }}
+          PREVIEW_URL: ${{ steps.preview.outputs.preview_url }}
+          VERSION_ID: ${{ steps.stage.outputs.version_id }}
+          CALLBACK: ${{ inputs.callback_base_url }}
+          WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          # flip_from_revision = 現在 active な version の ID (= rollback 時の戻し先)
+          # ここでは取得を省略 (TODO: wrangler versions list で active を解決)
+          # 当面 stage 時の version_id を flip_from_revision として送る = stage
+          # 前の latest を rollback 先として記録するロジックは Phase 5 で改善。
+          payload=$(jq -nc \
+            --arg wave_id "$WAVE_ID" \
+            --arg repo "$REPO" \
+            --arg preview_url "$PREVIEW_URL" \
+            --arg flip_from_revision "$VERSION_ID" \
+            '{wave_id: $wave_id, repo: $repo, ok: true,
+              preview_url: $preview_url, flip_from_revision: $flip_from_revision}')
+          curl -fsS -X POST "$CALLBACK/webhooks/release-wave/stage-report" \
+            -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$payload"
+
+      # 失敗時にも callback 投げて state machine を進める (= 全 stage 完了待ち
+      # で wave がハングしないように)。`if: failure()` は前の job step の
+      # 失敗を検知する。
+      - name: Callback stage-report (on failure)
+        if: failure()
+        env:
+          WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
+          REPO: ${{ github.repository }}
+          CALLBACK: ${{ inputs.callback_base_url }}
+          WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          payload=$(jq -nc \
+            --arg wave_id "$WAVE_ID" \
+            --arg repo "$REPO" \
+            --arg error "stage job failed; see Actions log for details" \
+            '{wave_id: $wave_id, repo: $repo, ok: false, error: $error}')
+          curl -fsS -X POST "$CALLBACK/webhooks/release-wave/stage-report" \
+            -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$payload" || true
+
+  # =========================================================================
+  # flip (cloudflare-workers): wrangler versions deploy --percentage 100
+  # =========================================================================
+  flip-cloudflare-workers:
+    name: Flip (cloudflare-workers)
+    needs: dispatch
+    if: needs.dispatch.outputs.event_type == 'release-wave-flip' && needs.dispatch.outputs.platform == 'cloudflare-workers'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.dispatch.outputs.target_tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm ci
+
+      # 一番直近の versions upload を 100% に振る。Phase 5 で stage 時に
+      # 取得した version_id を client_payload 経由で受け取って明示指定する
+      # ように改善する。
+      - name: wrangler versions deploy 100%
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ needs.dispatch.outputs.cf_account_id }}
+        run: |
+          set -euo pipefail
+          # `wrangler deploy` (= versions deploy 100% に等価) で latest version を flip
+          npx wrangler deploy
+
+      - name: Callback flip-report
+        env:
+          WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
+          REPO: ${{ github.repository }}
+          CALLBACK: ${{ inputs.callback_base_url }}
+          WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          payload=$(jq -nc \
+            --arg wave_id "$WAVE_ID" --arg repo "$REPO" \
+            '{wave_id: $wave_id, repo: $repo, ok: true}')
+          curl -fsS -X POST "$CALLBACK/webhooks/release-wave/flip-report" \
+            -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$payload"
+
+      - name: Callback flip-report (on failure)
+        if: failure()
+        env:
+          WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
+          REPO: ${{ github.repository }}
+          CALLBACK: ${{ inputs.callback_base_url }}
+          WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          payload=$(jq -nc \
+            --arg wave_id "$WAVE_ID" --arg repo "$REPO" \
+            --arg error "flip job failed; see Actions log" \
+            '{wave_id: $wave_id, repo: $repo, ok: false, error: $error}')
+          curl -fsS -X POST "$CALLBACK/webhooks/release-wave/flip-report" \
+            -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$payload" || true
+
+  # =========================================================================
+  # rollback (cloudflare-workers): wrangler rollback
+  # =========================================================================
+  rollback-cloudflare-workers:
+    name: Rollback (cloudflare-workers)
+    needs: dispatch
+    if: needs.dispatch.outputs.event_type == 'release-wave-rollback' && needs.dispatch.outputs.platform == 'cloudflare-workers'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.dispatch.outputs.head_sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm ci
+
+      - name: wrangler rollback
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ needs.dispatch.outputs.cf_account_id }}
+        run: |
+          set -euo pipefail
+          # `wrangler rollback` (Wrangler 4+) は直近に deploy した version を
+          # 前 version に戻す。明示的な version 指定が必要なら
+          # `wrangler rollback <id>` を Phase 5 で client_payload 由来の
+          # rollback_target_revision で渡す形に変える。
+          npx wrangler rollback
+
+      # rollback 完了 callback は現状 state machine に無い (= release_wave_rollback
+      # MCP tool が caller-driven で wave state を rolled-back に進める設計)。
+      # 進捗確認のため別途 ci-dashboard を更新する想定。
+
+  # =========================================================================
+  # Cloud Run path — Phase 4c で release-wave-gcp 経由で実装予定
+  # =========================================================================
+  stage-cloudrun:
+    name: Stage (cloudrun) [TODO Phase 4c]
+    needs: dispatch
+    if: needs.dispatch.outputs.event_type == 'release-wave-stage' && needs.dispatch.outputs.platform == 'cloudrun'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Not implemented
+        env:
+          WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
+          REPO: ${{ github.repository }}
+          CALLBACK: ${{ inputs.callback_base_url }}
+          WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          echo "::warning::cloudrun stage path not implemented yet (Phase 4c)"
+          # 進行をブロックしないよう ok=false で callback して wave を fail させる
+          payload=$(jq -nc \
+            --arg wave_id "$WAVE_ID" --arg repo "$REPO" \
+            --arg error "cloudrun stage path not implemented (Phase 4c TODO)" \
+            '{wave_id: $wave_id, repo: $repo, ok: false, error: $error}')
+          curl -fsS -X POST "$CALLBACK/webhooks/release-wave/stage-report" \
+            -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$payload" || true
+          exit 1
+
+  flip-cloudrun:
+    name: Flip (cloudrun) [TODO Phase 4c]
+    needs: dispatch
+    if: needs.dispatch.outputs.event_type == 'release-wave-flip' && needs.dispatch.outputs.platform == 'cloudrun'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::warning::cloudrun flip path not implemented yet (Phase 4c)"
+          exit 1
+
+  rollback-cloudrun:
+    name: Rollback (cloudrun) [TODO Phase 4c]
+    needs: dispatch
+    if: needs.dispatch.outputs.event_type == 'release-wave-rollback' && needs.dispatch.outputs.platform == 'cloudrun'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::warning::cloudrun rollback path not implemented yet (Phase 4c)"
+          exit 1
