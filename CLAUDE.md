@@ -294,6 +294,45 @@ jobs:
 
 これを 2026-05 の `feat(ci): bake secret-verify into go-ci/frontend-ci` (PR #XX) で reusable 内に **直列に内製化**。caller は `gcp_secret_verify_*` 3 input を渡すだけで `ci / secret-verify` 段が serial で動く。`secret-verify-gcp.yml` 単体 caller も維持されるので柔軟な構成は残せる。
 
+### release-wave-handler.yml
+
+ippoan/ci-dashboard#137 Phase 4b で導入した reusable workflow。各 release-wave 参加 repo が `.github/workflows/release-wave.yml` という 10 行 caller で呼ぶ。`repository_dispatch` で ci-dashboard が送る 3 event (`release-wave-stage` / `-flip` / `-rollback`) を受けて platform 別の deploy 操作を行い、結果を `https://ci-dashboard.ippoan.org/webhooks/release-wave/*` に shared secret (`RELEASE_WAVE_WEBHOOK_SECRET`) 付き curl で POST する。
+
+設定は `config/release-wave-targets.yaml` に集約。新規 repo を wave に参加させる際は **この yaml に entry 追加 + repo に caller 1 file 追加**の 2 step だけ。
+
+#### Caller テンプレート
+
+```yaml
+# <repo>/.github/workflows/release-wave.yml
+name: Release Wave
+
+on:
+  repository_dispatch:
+    types:
+      - release-wave-stage
+      - release-wave-flip
+      - release-wave-rollback
+
+permissions:
+  contents: write     # tag push
+  id-token: write     # GCP WIF (cloudrun の場合)
+
+jobs:
+  handler:
+    uses: ippoan/ci-workflows/.github/workflows/release-wave-handler.yml@main
+    secrets: inherit
+```
+
+#### Caller 側に必要な secrets
+
+- `RELEASE_WAVE_WEBHOOK_SECRET` (org secret、ci-dashboard の Secrets Store と同値)
+- `CLOUDFLARE_API_TOKEN` (cloudflare-workers platform の場合)
+- GCP WIF vars (cloudrun platform の場合、Phase 4c 以降)
+
+#### Security notes
+
+`github.event.client_payload.*` (= ci-dashboard から送られる任意 JSON) は **untrusted** として扱い、`wave_id` / `target_tag` / `head_sha` を `actions/checkout` の `ref:` に使う前に正規表現で形式検証する。ref injection 防止は本 reusable の dispatch job 内で済ませてある。
+
 ### tag-release.yml / dev-tag-release.yml
 
 リリースタグ自動採番の reusable 2 種:

@@ -1,0 +1,72 @@
+# Release Wave 機構に参加する repo の metadata。
+#
+# release-wave-handler.yml reusable workflow が
+# `repository_dispatch` を受けた時に、自分の repo (`github.repository`) を
+# この yaml で lookup して platform / service / preview hostname を決定する。
+#
+# 設計の親 issue: ippoan/ci-dashboard#137 Phase 4
+#
+# 新規 repo を wave に参加させる手順:
+#   1. 本 file に target entry を追加して PR / merge
+#   2. その repo に `.github/workflows/release-wave.yml` (10 行 caller) を作る
+#   3. その repo を ci-dashboard の `release_wave_start` MCP tool に渡せる
+#      ようになる
+
+targets:
+
+  # ---- Cloud Run (rust-alc-api) ----
+  # multi-service repo。services[] に列挙した service それぞれに対し
+  # stage / flip / rollback を実行する。release-wave-gcp proxy 経由で
+  # gcloud run services の traffic 操作を行う。
+  "ippoan/rust-alc-api":
+    platform: cloudrun
+    services:
+      - rust-alc-api-backend
+      - rust-alc-api-gateway
+      - rust-alc-api-tenko
+      - rust-alc-api-carins
+      - rust-alc-api-dtako
+      - rust-alc-api-trouble
+    gcp_project: cloudsql-sv
+    gcp_region: asia-northeast1
+    preview_hostname: preview-rust-alc-api.ippoan.org
+
+  # ---- Cloudflare Workers ----
+  "ippoan/auth-worker":
+    platform: cloudflare-workers
+    cf_worker_name: auth-worker
+    cf_account_id: 24b45709d060d957340180e995f0d373
+    preview_hostname: preview-auth.ippoan.org
+
+  # nuxt-notify は 3 unit monorepo (app / email / realtime)。
+  # 各 unit を independent な CF Workers として stage / flip する。
+  # monorepo_units が定義されている時、release-wave-handler は unit ごとに
+  # 並列で stage / flip を走らせ、全 unit done = 1 repo done として callback。
+  "ippoan/nuxt-notify":
+    platform: cloudflare-workers
+    monorepo_units:
+      - name: nuxt-notify
+        preview_hostname: preview-app.notify.ippoan.org
+      - name: notify-email-receiver
+        preview_hostname: preview-email.notify.ippoan.org
+      - name: notify-realtime-bus
+        preview_hostname: preview-realtime.notify.ippoan.org
+    cf_account_id: 24b45709d060d957340180e995f0d373
+
+  "ippoan/alc-app":
+    platform: cloudflare-workers
+    cf_worker_name: alc-app
+    cf_account_id: 24b45709d060d957340180e995f0d373
+    preview_hostname: preview-alc.ippoan.org
+
+  "ippoan/nuxt-pwa-carins":
+    platform: cloudflare-workers
+    cf_worker_name: nuxt-pwa-carins
+    cf_account_id: 24b45709d060d957340180e995f0d373
+    preview_hostname: preview-carins.ippoan.org
+
+  "ippoan/nuxt-egov":
+    platform: cloudflare-workers
+    cf_worker_name: nuxt-egov
+    cf_account_id: 24b45709d060d957340180e995f0d373
+    preview_hostname: preview-egov.ippoan.org
