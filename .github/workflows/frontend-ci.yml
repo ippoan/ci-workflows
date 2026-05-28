@@ -1176,7 +1176,19 @@ jobs:
           # `wrangler versions upload` は --var / --env 等の flag をそのまま受ける
           # ので、caller の deploy_release_script の置換で足りる。
           if [ "$RELEASE_NO_TRAFFIC" = "true" ]; then
-            CMD="${CMD//wrangler deploy/wrangler versions upload}"
+            if printf '%s' "$CMD" | grep -q 'wrangler deploy'; then
+              CMD="${CMD//wrangler deploy/wrangler versions upload}"
+            elif printf '%s' "$CMD" | grep -q 'wrangler versions upload'; then
+              : # 既に no-traffic (caller が直接 versions upload を指定) — そのまま
+            else
+              # release_no_traffic=true だが置換対象が無い → no-traffic を保証
+              # できない。silent に traffic deploy せず loud に fail させる
+              # (silent な 100% deploy 事故を防ぐ)。Refs ippoan/ci-dashboard#174。
+              echo "::error::release_no_traffic=true だが deploy script に 'wrangler deploy' / 'wrangler versions upload' が無く no-traffic を保証できません。"
+              echo "::error::deploy_release_script を見直すか、即 100% deploy で良いなら release_no_traffic: false を指定してください。"
+              echo "::error::script: $CMD"
+              exit 1
+            fi
           fi
           echo "release deploy: $CMD"
           eval "$CMD"
