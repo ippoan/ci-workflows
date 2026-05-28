@@ -116,8 +116,21 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --tags
-          # scan `<prefix><version_prefix>*` (default は `<prefix>v*`)。
-          LATEST=$(git tag -l "${PREFIX}${VERSION_PREFIX}*" --sort=-v:refname | head -1)
+          # scan `<prefix><version_prefix>*` (default は `<prefix>v*`)、ただし
+          # prefix/version_prefix を剥がした残りが **厳密な N.N.N** の tag だけを
+          # 採番候補にする。`v0.5.99-wave-test-08` のような suffix 付き tag が
+          # `-v:refname` ソートで最上位に来て PATCH="99-wave-test-08" となり、
+          # `$((PATCH + 1))` の算術評価で `wave: unbound variable` で落ちるのを防ぐ。
+          # desc ソート順に走査し、最初に strict semver へ一致した tag を採用する。
+          LATEST=""
+          while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            rest="${t#${PREFIX}${VERSION_PREFIX}}"
+            if [[ "$rest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              LATEST="$t"
+              break
+            fi
+          done < <(git tag -l "${PREFIX}${VERSION_PREFIX}*" --sort=-v:refname)
 
           if [ -z "$LATEST" ]; then
             MAJOR=0; MINOR=0; PATCH=0
