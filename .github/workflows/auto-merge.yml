@@ -6,12 +6,13 @@ on:
     secrets:
       CI_APP_ID:
         description: |
-          GitHub App ID (org secret). When set together with
-          `CI_APP_PRIVATE_KEY`, an installation access token is minted at
-          runtime via `actions/create-github-app-token` and used in
-          preference to any PAT below.
+          GitHub App ID (org secret). **Required** (enforced at runtime): set
+          together with `CI_APP_PRIVATE_KEY` so an installation access token is
+          minted via `actions/create-github-app-token`. If absent, the job
+          fails loud (the old github.token fallback was removed — see the
+          `Require App token` step). Pass via `secrets: inherit` or explicitly.
 
-          Why this is preferred: a merge performed with an App token pushes
+          Why this is required: a merge performed with an App token pushes
           the `push: main` (and `pull_request: closed`) events as the App
           actor — NOT `github-actions[bot]` — so downstream workflows
           (release.yml chain, dev-tag-release, post-merge close jobs) DO
@@ -25,24 +26,21 @@ on:
       CI_APP_PRIVATE_KEY:
         description: |
           PEM private key for the GitHub App identified by `CI_APP_ID`
-          (org secret, multi-line). Required alongside `CI_APP_ID`.
+          (org secret, multi-line). **Required** alongside `CI_APP_ID` —
+          the job fails loud if either is missing.
         required: false
       AUTO_MERGE_PAT:
         description: |
-          Optional PAT (legacy name). Fallback used only when the GitHub App
-          secrets above are not set. If set, takes precedence over
-          `TAG_RELEASE_PAT`. Both fall back to `github.token` when unset.
+          Legacy PAT. **No longer used** for the merge token (App token is now
+          mandatory). Still accepted as a `workflow_call` secret for interface
+          compatibility so existing callers that pass it do not error.
         required: false
       TAG_RELEASE_PAT:
         description: |
           Org-standard PAT used across `tag-release.yml` /
-          `dev-tag-release.yml`. Fallback used only when the GitHub App
-          secrets are not set. Required scopes: `repo` + `workflow`
-          (classic) or Contents/PR/Workflow Read-Write (fine-grained).
-          `workflow` scope is required to merge PRs that touch
-          `.github/workflows/**` — without it the merge mutation fails with
-          HTTP 401 "Bad credentials" even though `gh pr view` succeeds with
-          the same token (ippoan/mcp-cf-workers#3 で実害発生)。
+          `dev-tag-release.yml`. **No longer used** for the auto-merge token
+          (App token is now mandatory). Still accepted here for interface
+          compatibility so callers that pass it explicitly do not error.
         required: false
 
 jobs:
@@ -59,10 +57,10 @@ jobs:
       # env に置かず create-github-app-token の `with:` に直接渡す。
       CI_APP_ID: ${{ secrets.CI_APP_ID }}
     steps:
-      # GitHub App installation token を mint (org が CI_APP_ID/KEY を設定済の時)。
-      # 未設定の caller は skip され、下の GH_TOKEN は PAT → github.token に fallback
-      # するので後方互換。
-      - name: Mint GitHub App installation token (preferred over PAT)
+      # GitHub App installation token を mint (caller が CI_APP_ID/KEY を渡した時)。
+      # CI_APP_ID が空 (= caller が secret を配線していない) なら skip され、
+      # 次の guard step で fail-loud する。
+      - name: Mint GitHub App installation token (required)
         id: app-token
         if: env.CI_APP_ID != ''
         uses: actions/create-github-app-token@v2
@@ -70,16 +68,32 @@ jobs:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
+      # caller が CI_APP_ID/CI_APP_PRIVATE_KEY を渡していないと App token を mint
+      # できない。以前はここで github.token に **silent fallback** していたが、
+      # それだと 2 つの実害が cosmetic に隠れていた:
+      #   1. 個人 GraphQL クォータ枯渇による "API rate limit already exceeded
+      #      for user ID" の間欠 fail (gh pr merge --auto で発生)
+      #   2. merge commit の push actor が github-actions[bot] になり downstream
+      #      workflow (release.yml chain 等) が発火しない (GITHUB_TOKEN event は
+      #      Actions に無視される / ippoan/mcp-relay-rs#21 の silent skip 実害)
+      # fail-loud に倒して caller 側の secret 配線漏れを即座に検出させる。
+      # caller は `secrets: inherit` か CI_APP_ID/CI_APP_PRIVATE_KEY の明示 pass で
+      # 解消できる。Refs #65
+      - name: Require App token (fail loud if caller did not pass CI_APP_ID/CI_APP_PRIVATE_KEY)
+        if: steps.app-token.outputs.token == ''
+        run: |
+          echo "::error title=auto-merge: missing GitHub App credentials::Caller did not provide CI_APP_ID / CI_APP_PRIVATE_KEY, so no GitHub App installation token could be minted. Pass them via 'secrets: inherit' (or explicit 'secrets:' with CI_APP_ID and CI_APP_PRIVATE_KEY). The github.token fallback was removed because it caused intermittent 'API rate limit already exceeded' failures and a github-actions[bot] push actor that does not trigger downstream release workflows. See ippoan/ci-workflows#65."
+          exit 1
+
       - name: Check mergeable and queue squash merge
         env:
-          # 優先順位: App token > AUTO_MERGE_PAT > TAG_RELEASE_PAT > github.token。
-          # App token / PAT は merge commit の push actor を非 GITHUB_TOKEN にする
-          # ため、resulting `push: main` / `pull_request: closed` イベントが
-          # downstream workflow を発火させられる (= release.yml chain 等)。
-          # github.token だと github-actions[bot] 扱いになり Actions に無視される
-          # (ippoan/mcp-relay-rs#21 の silent skip 実害)。App token なら個人 PAT の
-          # GraphQL クォータも食わない (rate-limit cosmetic fail 回避)。
-          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.AUTO_MERGE_PAT || secrets.TAG_RELEASE_PAT || github.token }}
+          # App installation token のみを使う (上の guard で必ず非空)。App token は
+          # 独自の rate-limit バケットを持つため個人 GraphQL クォータを食わず、merge
+          # commit の push actor も非 GITHUB_TOKEN になるので downstream workflow を
+          # 発火させられる。AUTO_MERGE_PAT / TAG_RELEASE_PAT は interface 互換のため
+          # secrets で受けるが (caller が明示 pass してもエラーにしない)、token には
+          # 使わない。
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           PR=${{ github.event.number }}
           REPO=${{ github.repository }}
