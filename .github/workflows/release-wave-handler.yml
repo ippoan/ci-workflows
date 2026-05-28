@@ -183,6 +183,46 @@ jobs:
           fi
           platform=$(yq ".targets[\"$REPO\"].platform // \"\"" "$CFG")
           echo "platform=$platform" >> "$GITHUB_OUTPUT"
+
+          # ---- registration の完全性を強制 (silent no-op 防止) ----
+          # platform が空 / 未知だと、後段の platform 別 job の `if:` が全て false に
+          # なり、stage callback が一切飛ばず wave が staging のまま hang する
+          # (= GitHub Actions run は緑なのに何も起きない silent failure)。
+          # ここで明示 fail させて handler run を赤くし、設定漏れを loud に検出する。
+          # platform 別の必須 field 欠落も同様に fail。Refs ippoan/ci-dashboard#174。
+          case "$platform" in
+            cloudflare-workers)
+              cf_account_id_v=$(yq    ".targets[\"$REPO\"].cf_account_id  // \"\"" "$CFG")
+              cf_worker_name_v=$(yq   ".targets[\"$REPO\"].cf_worker_name // \"\"" "$CFG")
+              monorepo_units_v=$(yq -o=json -I0 ".targets[\"$REPO\"].monorepo_units // []" "$CFG")
+              if [[ -z "$cf_account_id_v" ]]; then
+                echo "::error::$REPO: platform=cloudflare-workers requires 'cf_account_id'"
+                exit 1
+              fi
+              if [[ -z "$cf_worker_name_v" && "$monorepo_units_v" == "[]" ]]; then
+                echo "::error::$REPO: cloudflare-workers requires 'cf_worker_name' or 'monorepo_units'"
+                exit 1
+              fi
+              ;;
+            cloudrun)
+              gcp_project_v=$(yq ".targets[\"$REPO\"].gcp_project // \"\"" "$CFG")
+              gcp_region_v=$(yq  ".targets[\"$REPO\"].gcp_region  // \"\"" "$CFG")
+              services_v=$(yq -o=json -I0 ".targets[\"$REPO\"].services // []" "$CFG")
+              if [[ -z "$gcp_project_v" || -z "$gcp_region_v" || "$services_v" == "[]" ]]; then
+                echo "::error::$REPO: platform=cloudrun requires 'gcp_project', 'gcp_region', and non-empty 'services'"
+                exit 1
+              fi
+              ;;
+            "")
+              echo "::error::$REPO: 'platform' is missing in $CFG (must be 'cloudflare-workers' or 'cloudrun')"
+              exit 1
+              ;;
+            *)
+              echo "::error::$REPO: unknown platform '$platform' (must be 'cloudflare-workers' or 'cloudrun')"
+              exit 1
+              ;;
+          esac
+
           echo "cf_worker_name=$(yq      ".targets[\"$REPO\"].cf_worker_name   // \"\"" "$CFG")" >> "$GITHUB_OUTPUT"
           echo "cf_account_id=$(yq       ".targets[\"$REPO\"].cf_account_id    // \"\"" "$CFG")" >> "$GITHUB_OUTPUT"
           echo "preview_hostname=$(yq    ".targets[\"$REPO\"].preview_hostname // \"\"" "$CFG")" >> "$GITHUB_OUTPUT"
