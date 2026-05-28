@@ -1,0 +1,91 @@
+name: Report frontend compatibility
+description: >-
+  integration test green 時に、この frontend がどの backend image を相手に
+  test したかを ci-dashboard の `frontend-test-report` webhook に記録する。
+  Release Wave compatibility matrix の緑/赤判定のデータ源。
+  仕様 SoT: ippoan/ci-dashboard docs/release-wave-compatibility-kv.md (Refs #157/#158)
+
+inputs:
+  ci_dashboard_base_url:
+    description: ci-dashboard worker の base URL
+    required: false
+    default: 'https://ci-dashboard.ippoan.org'
+  backend_repo:
+    description: 'integration test の相手 backend repo (owner/name)。例: ippoan/rust-alc-api'
+    required: true
+  backend_image:
+    description: >-
+      test 相手の backend image identifier。空なら ci-dashboard の
+      `GET /backend-current-image` で現 production image を取りに行く
+      (= 通常 PR CI の経路)。retest 経路では dispatch payload の値を渡す。
+    required: false
+    default: ''
+  prod_version:
+    description: '現在 production に出ている (or 出ようとしている) frontend version。通常 github.ref_name'
+    required: true
+  webhook_secret:
+    description: 'ci-dashboard webhook の shared secret (RELEASE_WAVE_WEBHOOK_SECRET)'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Report compatibility to ci-dashboard
+      shell: bash
+      env:
+        CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
+        BACKEND_REPO: ${{ inputs.backend_repo }}
+        BACKEND_IMAGE: ${{ inputs.backend_image }}
+        PROD_VERSION: ${{ inputs.prod_version }}
+        WEBHOOK_SECRET: ${{ inputs.webhook_secret }}
+        REPO: ${{ github.repository }}
+        CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        set -euo pipefail
+
+        # secret が無い caller (= explicit secrets 渡しで RELEASE_WAVE_WEBHOOK_SECRET
+        # を流していない repo) では報告経路が無いので no-op。Phase A の
+        # 「既存挙動を変えない」原則に従い fail させない。
+        if [[ -z "$WEBHOOK_SECRET" ]]; then
+          echo "::notice::RELEASE_WAVE_WEBHOOK_SECRET not available; skipping compatibility report."
+          exit 0
+        fi
+
+        image="$BACKEND_IMAGE"
+
+        # image 未指定 (通常 PR CI) は現 production backend image を取りに行く。
+        # backend record がまだ無い (404) / endpoint 不通なら、test 対象 image を
+        # 確定できないので報告を skip する (誤った image を記録しない)。
+        if [[ -z "$image" ]]; then
+          url="$CI_DASHBOARD_BASE/backend-current-image?repo=$BACKEND_REPO"
+          resp=$(curl -sS -w '\n%{http_code}' "$url" || echo $'\n000')
+          code=$(printf '%s' "$resp" | tail -1)
+          body=$(printf '%s' "$resp" | sed '$d')
+          if [[ "$code" != "200" ]]; then
+            echo "::notice::GET /backend-current-image for $BACKEND_REPO returned $code; skipping compatibility report (no current image to test against)."
+            exit 0
+          fi
+          image=$(printf '%s' "$body" | jq -r '.current_image // ""')
+          if [[ -z "$image" ]]; then
+            echo "::notice::backend-current-image response had no current_image; skipping report."
+            exit 0
+          fi
+        fi
+
+        payload=$(jq -nc \
+          --arg repo "$REPO" \
+          --arg prod_version "$PROD_VERSION" \
+          --arg backend_repo "$BACKEND_REPO" \
+          --arg backend_image "$image" \
+          --arg ci_run_url "$CI_RUN_URL" \
+          '{repo: $repo, prod_version: $prod_version,
+            tested: {backend_repo: $backend_repo, backend_image: $backend_image,
+                     ci_run_url: $ci_run_url}}')
+
+        echo "Reporting: $REPO tested against $BACKEND_REPO @ $image"
+        curl -fsS -X POST "$CI_DASHBOARD_BASE/webhooks/release-wave/frontend-test-report" \
+          -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
+          -H "Content-Type: application/json" \
+          -d "$payload"
+        echo ""
+        echo "✅ compatibility report sent"

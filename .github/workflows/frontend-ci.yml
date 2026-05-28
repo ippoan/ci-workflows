@@ -145,12 +145,44 @@ on:
         required: false
         type: boolean
         default: true
+      # ----- Release Wave compatibility report (Refs ippoan/ci-dashboard#157/#158) -----
+      # integration test green 時にこの frontend がどの backend image を相手に
+      # test したかを ci-dashboard に記録し、Release Wave の互換性 matrix の
+      # データ源にする。opt-in (= compat_backend_repo が空なら report job は
+      # skip され既存挙動に無影響)。
+      compat_backend_repo:
+        description: >-
+          integration test の相手 backend repo (owner/name)。例: ippoan/rust-alc-api。
+          設定すると integration test green 後に compatibility report job が走る。
+          空 = report しない (default)。
+        required: false
+        type: string
+        default: ''
+      compat_backend_image:
+        description: >-
+          test 相手の backend image を明示指定する用。空なら ci-dashboard の
+          現 production image を取りに行く (通常 PR CI 経路)。
+          retest (repository_dispatch) 経路で dispatch payload の image を渡す。
+        required: false
+        type: string
+        default: ''
+      ci_dashboard_base_url:
+        description: 'ci-dashboard worker の base URL (compatibility report 先)'
+        required: false
+        type: string
+        default: 'https://ci-dashboard.ippoan.org'
     secrets:
       CLOUDFLARE_API_TOKEN:
         description: Cloudflare API token for wrangler deploy
         required: false
       PROPAGATE_PAT:
         description: PAT with repo scope for cross-repo package propagation
+        required: false
+      RELEASE_WAVE_WEBHOOK_SECRET:
+        description: >-
+          ci-dashboard webhook shared secret。compat_backend_repo 設定時の
+          compatibility report に使う。org-level secret を caller の
+          `secrets: inherit` 経由で受け取る (無ければ report job は no-op)。
         required: false
 
 jobs:
@@ -727,6 +759,28 @@ jobs:
       - name: Cleanup containers
         if: always()
         run: docker compose -f ${{ inputs.integration_compose_file }} down -v
+
+  # integration test が green な時、この frontend がどの backend image を相手に
+  # test したかを ci-dashboard に記録する (Release Wave compatibility のデータ源)。
+  # opt-in: compat_backend_repo が空なら job 自体が skip され既存挙動に無影響。
+  # retest (repository_dispatch: release-wave-retest) 経路では caller が
+  # compat_backend_image に dispatch payload の image を渡す。
+  report-compatibility:
+    name: Report Compatibility
+    needs: [integration-test]
+    if: >-
+      always() &&
+      inputs.compat_backend_repo != '' &&
+      needs.integration-test.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ippoan/ci-workflows/.github/actions/report-frontend-compat@main
+        with:
+          ci_dashboard_base_url: ${{ inputs.ci_dashboard_base_url }}
+          backend_repo: ${{ inputs.compat_backend_repo }}
+          backend_image: ${{ inputs.compat_backend_image }}
+          prod_version: ${{ github.ref_name }}
+          webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
 
   # secret-verify は test/typecheck/integration-test の **後**、deploy の
   # **前**。GCP Secret Manager に missing がある状態で wrangler deploy する

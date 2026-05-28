@@ -1,0 +1,81 @@
+name: Report backend deploy
+description: >-
+  backend の production deploy 成功時に、現 production image を ci-dashboard の
+  `backend-deploy-report` webhook に記録する。Release Wave compatibility matrix が
+  「frontend がこの image を test 済みか」を判定する基準になる。
+  仕様 SoT: ippoan/ci-dashboard docs/release-wave-compatibility-kv.md (Refs #157/#158)
+
+inputs:
+  ci_dashboard_base_url:
+    description: ci-dashboard worker の base URL
+    required: false
+    default: 'https://ci-dashboard.ippoan.org'
+  repo:
+    description: 'backend repo (owner/name)。default = この workflow の repo'
+    required: false
+    default: ${{ github.repository }}
+  current_image:
+    description: >-
+      production traffic を受けている image identifier (不透明文字列、完全一致比較)。
+      Cloud Run=revision name / target tag、CF Workers=version id、GHCR=digest 等。
+    required: true
+  deployed_by:
+    description: 'deploy の主体。例: release-wave-gcp / <workflow_name>'
+    required: false
+    default: ${{ github.workflow }}
+  wave_id:
+    description: 'wave 経由 deploy なら wave_id。単独 deploy なら空 (= null 格納)'
+    required: false
+    default: ''
+  webhook_secret:
+    description: 'ci-dashboard webhook の shared secret (RELEASE_WAVE_WEBHOOK_SECRET)'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Report backend deploy to ci-dashboard
+      shell: bash
+      env:
+        CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
+        REPO: ${{ inputs.repo }}
+        CURRENT_IMAGE: ${{ inputs.current_image }}
+        DEPLOYED_BY: ${{ inputs.deployed_by }}
+        WAVE_ID: ${{ inputs.wave_id }}
+        WEBHOOK_SECRET: ${{ inputs.webhook_secret }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$WEBHOOK_SECRET" ]]; then
+          echo "::notice::RELEASE_WAVE_WEBHOOK_SECRET not available; skipping backend deploy report."
+          exit 0
+        fi
+        if [[ -z "$CURRENT_IMAGE" ]]; then
+          echo "::error::current_image is empty; cannot report backend deploy."
+          exit 1
+        fi
+
+        # wave_id は空なら body から省く (= server 側で null 格納)。
+        if [[ -n "$WAVE_ID" ]]; then
+          payload=$(jq -nc \
+            --arg repo "$REPO" \
+            --arg current_image "$CURRENT_IMAGE" \
+            --arg deployed_by "$DEPLOYED_BY" \
+            --arg wave_id "$WAVE_ID" \
+            '{repo: $repo, current_image: $current_image,
+              deployed_by: $deployed_by, wave_id: $wave_id}')
+        else
+          payload=$(jq -nc \
+            --arg repo "$REPO" \
+            --arg current_image "$CURRENT_IMAGE" \
+            --arg deployed_by "$DEPLOYED_BY" \
+            '{repo: $repo, current_image: $current_image, deployed_by: $deployed_by}')
+        fi
+
+        echo "Reporting backend deploy: $REPO @ $CURRENT_IMAGE (by $DEPLOYED_BY${WAVE_ID:+, wave $WAVE_ID})"
+        curl -fsS -X POST "$CI_DASHBOARD_BASE/webhooks/release-wave/backend-deploy-report" \
+          -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
+          -H "Content-Type: application/json" \
+          -d "$payload"
+        echo ""
+        echo "✅ backend deploy report sent"

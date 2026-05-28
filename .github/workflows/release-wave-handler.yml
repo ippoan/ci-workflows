@@ -384,6 +384,19 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$payload"
 
+      # flip 成功 = この backend の現 production image が target_tag になった。
+      # compatibility matrix の基準 (backend::<repo>.current_image) を更新する。
+      # (Refs ippoan/ci-dashboard#157 — backend deploy report)
+      - name: Report backend deploy (compatibility)
+        uses: ippoan/ci-workflows/.github/actions/report-backend-deploy@main
+        with:
+          ci_dashboard_base_url: ${{ inputs.callback_base_url }}
+          repo: ${{ github.repository }}
+          current_image: ${{ needs.dispatch.outputs.target_tag }}
+          deployed_by: release-wave
+          wave_id: ${{ needs.dispatch.outputs.wave_id }}
+          webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+
       - name: Callback flip-report (on failure)
         if: failure()
         env:
@@ -663,6 +676,20 @@ jobs:
             -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
             -H "Content-Type: application/json" \
             -d "$payload"
+
+      # 全 service の flip が成功した時のみ、現 production image を target_tag に
+      # 更新する。matrix 失敗時 (= 一部 service が旧 revision のまま) は記録しない。
+      # (Refs ippoan/ci-dashboard#157 — backend deploy report)
+      - name: Report backend deploy (compatibility)
+        if: needs.flip-cloudrun.result == 'success'
+        uses: ippoan/ci-workflows/.github/actions/report-backend-deploy@main
+        with:
+          ci_dashboard_base_url: ${{ inputs.callback_base_url }}
+          repo: ${{ github.repository }}
+          current_image: ${{ needs.dispatch.outputs.target_tag }}
+          deployed_by: release-wave-gcp
+          wave_id: ${{ needs.dispatch.outputs.wave_id }}
+          webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
 
   # ---- Rollback (cloudrun): matrix で services[] 並列 ----
   rollback-cloudrun:
