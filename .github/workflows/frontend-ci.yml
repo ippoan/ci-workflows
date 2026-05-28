@@ -1160,7 +1160,13 @@ jobs:
           RELEASE_SCRIPT: ${{ inputs.deploy_release_script }}
           PROJECT_TYPE: ${{ inputs.project_type }}
           RELEASE_NO_TRAFFIC: ${{ inputs.release_no_traffic }}
+          # no-traffic release を report する先 (Refs ippoan/ci-dashboard#181)。
+          CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
+          RELEASE_WAVE_WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
+          set -uo pipefail
           CMD="$RELEASE_SCRIPT"
           if [ -z "$CMD" ]; then
             if [ "$PROJECT_TYPE" = "worker" ]; then
@@ -1175,11 +1181,14 @@ jobs:
           # ダッシュボード / `wrangler versions deploy <id>@100%` で明示的に行う。
           # `wrangler versions upload` は --var / --env 等の flag をそのまま受ける
           # ので、caller の deploy_release_script の置換で足りる。
+          NO_TRAFFIC_UPLOAD=false
           if [ "$RELEASE_NO_TRAFFIC" = "true" ]; then
             if printf '%s' "$CMD" | grep -q 'wrangler deploy'; then
               CMD="${CMD//wrangler deploy/wrangler versions upload}"
+              NO_TRAFFIC_UPLOAD=true
             elif printf '%s' "$CMD" | grep -q 'wrangler versions upload'; then
               : # 既に no-traffic (caller が直接 versions upload を指定) — そのまま
+              NO_TRAFFIC_UPLOAD=true
             else
               # release_no_traffic=true だが置換対象が無い → no-traffic を保証
               # できない。silent に traffic deploy せず loud に fail させる
@@ -1191,7 +1200,44 @@ jobs:
             fi
           fi
           echo "release deploy: $CMD"
-          eval "$CMD"
+          # 出力を capture しつつログにも出す (version id / preview URL 抽出用)。
+          OUT=$(eval "$CMD" 2>&1)
+          rc=$?
+          printf '%s\n' "$OUT"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::release deploy failed (rc=$rc)"
+            exit "$rc"
+          fi
+
+          # ---- pending-release report (Refs ippoan/ci-dashboard#181) ----
+          # no-traffic upload した version を ci-dashboard に登録し、
+          # /release-wave の「Pending releases」から Flip できるようにする。
+          # best-effort: 失敗してもリリース自体は止めない。
+          if [ "$NO_TRAFFIC_UPLOAD" != "true" ]; then
+            exit 0
+          fi
+          VID=$(printf '%s' "$OUT" | grep -oiE 'Version ID:[[:space:]]+[0-9a-f-]+' | tail -1 | awk '{print $NF}')
+          PREVIEW=$(printf '%s' "$OUT" | grep -iE 'preview url' | grep -oiE 'https://[a-z0-9._-]+\.workers\.dev[^[:space:]]*' | head -1 || true)
+          if [ -z "$VID" ]; then
+            echo "::warning::could not parse Version ID from wrangler output; skip pending-release report"
+            exit 0
+          fi
+          if [ -z "${RELEASE_WAVE_WEBHOOK_SECRET:-}" ]; then
+            echo "::notice::RELEASE_WAVE_WEBHOOK_SECRET 未設定のため pending-release report を skip"
+            exit 0
+          fi
+          payload=$(jq -nc \
+            --arg repo "$REPO" \
+            --arg version_id "$VID" \
+            --arg tag "$TAG" \
+            --arg preview_url "$PREVIEW" \
+            '{repo: $repo, version_id: $version_id, tag: $tag, preview_url: $preview_url}
+             | with_entries(select(.value != ""))')
+          echo "reporting pending release: repo=$REPO version_id=$VID tag=$TAG"
+          curl -fsS -X POST "$CI_DASHBOARD_BASE/webhooks/release-wave/pending-release" \
+            -H "X-Release-Wave-Webhook-Secret: $RELEASE_WAVE_WEBHOOK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$payload" || echo "::warning::pending-release report failed (best-effort)"
 
   publish-dev:
     name: Publish Dev

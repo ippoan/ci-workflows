@@ -487,7 +487,11 @@ jobs:
             npx wrangler deploy
           fi
 
+      # pending_release flip (= 単独リリースの Flip ボタン経由) には対応する
+      # wave が無いので flip-report を送らない (NOT_FOUND になるだけ)。
+      # Refs ippoan/ci-dashboard#181。
       - name: Callback flip-report
+        if: github.event.client_payload.pending_release != true
         env:
           WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
           REPO: ${{ github.repository }}
@@ -517,7 +521,7 @@ jobs:
           webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
 
       - name: Callback flip-report (on failure)
-        if: failure()
+        if: failure() && github.event.client_payload.pending_release != true
         env:
           WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
           REPO: ${{ github.repository }}
