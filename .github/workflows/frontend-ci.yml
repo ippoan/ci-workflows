@@ -174,10 +174,13 @@ on:
       compat_backend_image_env:
         description: >-
           integration test の docker-compose が backend image tag/ref を読む env
-          変数名 (例: API_IMAGE)。compat_backend_repo と併用すると、test 前に解決
-          した backend SHA を `<this>=ghcr.io/<compat_backend_repo>:<sha>` として
-          export し、**記録する SHA と同じ image で integration test を回す**
-          (truthful 突合)。空なら compose は自前の default tag を使う (従来挙動)。
+          変数名 (例: API_IMAGE)。test 前に解決した backend SHA を
+          `<this>=ghcr.io/<compat_backend_repo>:<sha>` として export し、
+          **記録する SHA と同じ image で integration test を回す** (truthful 突合)。
+          **compat_backend_repo を指定する場合は必須** — 未指定だと「compose
+          default で test したのに現 SHA を記録」という不正確な緑を防ぐため
+          integration-test が fail する。compat 報告自体を止めるなら
+          compat_backend_repo を外すこと。
         required: false
         type: string
         default: ''
@@ -772,6 +775,13 @@ jobs:
           WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
+          # compat_backend_repo を指定したら compat_backend_image_env も必須。
+          # 無いと「compose default (:dev 等) で test したのに現 SHA を記録」と
+          # いう truthful でない緑が黙って出るため、配線忘れを fail で強制検出する。
+          if [[ -z "$IMAGE_ENV_NAME" ]]; then
+            echo "::error::compat_backend_repo を指定する場合は compat_backend_image_env も必須です。docker-compose が backend image を読む env 名 (例: API_IMAGE) を渡してください。記録 SHA と同じ image で integration test を回す (truthful 突合) ため。compat 報告自体を止めるなら compat_backend_repo を外してください。"
+            exit 1
+          fi
           image="$BACKEND_IMAGE"
           if [[ -z "$image" && -n "$WEBHOOK_SECRET" ]]; then
             url="$CI_DASHBOARD_BASE/webhooks/release-wave/backend-current-image?repo=$BACKEND_REPO"
