@@ -33,10 +33,7 @@ targets:
 
   # ---- Cloudflare Workers ----
   "ippoan/auth-worker":
-    # [TEST ippoan/ci-dashboard#174] platform を意図的に欠落させて、
-    # release-wave-handler の registration 検証 (#74) が loud に fail するか
-    # 確認するためのテスト変更。検証後に必ず revert すること。
-    # platform: cloudflare-workers   # <- 意図的にコメントアウト (fail test)
+    platform: cloudflare-workers
     cf_worker_name: auth-worker
     cf_account_id: 24b45709d060d957340180e995f0d373
     preview_hostname: preview-auth.ippoan.org
