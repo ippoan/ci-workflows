@@ -77,6 +77,7 @@ jobs:
       gcp_region:           ${{ steps.lookup.outputs.gcp_region }}
       services_json:        ${{ steps.lookup.outputs.services_json }}
       monorepo_units_json:  ${{ steps.lookup.outputs.monorepo_units_json }}
+      install_command:      ${{ steps.lookup.outputs.install_command }}
     steps:
       # client_payload は **attacker controllable** (= repository_dispatch
       # 経由で送られる任意 JSON)。env 経由で受けて parse + strict 形式検証する。
@@ -185,6 +186,11 @@ jobs:
           # services / monorepo_units は JSON 配列で串刺し
           echo "services_json=$(yq -o=json -I0     ".targets[\"$REPO\"].services       // []" "$CFG")" >> "$GITHUB_OUTPUT"
           echo "monorepo_units_json=$(yq -o=json -I0 ".targets[\"$REPO\"].monorepo_units // []" "$CFG")" >> "$GITHUB_OUTPUT"
+          # per-repo install command (default 'npm ci')。auth-worker 等
+          # lock を strict 同期しない運用の repo で 'npm install ...' を選択可。
+          # config は ci-workflows committer が管理する trusted input。
+          # `-r` (raw) で quote を剥がす → bash -c に直接渡せる文字列にする。
+          echo "install_command=$(yq -r ".targets[\"$REPO\"].install_command // \"npm ci\"" "$CFG")" >> "$GITHUB_OUTPUT"
 
   # =========================================================================
   # stage (cloudflare-workers): wrangler versions upload + preview URL
@@ -204,7 +210,9 @@ jobs:
           node-version: '20'
 
       - name: Install deps
-        run: npm ci
+        env:
+          INSTALL_CMD: ${{ needs.dispatch.outputs.install_command }}
+        run: bash -c "$INSTALL_CMD"
 
       # tag を打って push。これが「stage された code の immutable ref」になる
       # ので flip 時に再 checkout で参照される。
@@ -321,7 +329,10 @@ jobs:
         with:
           node-version: '20'
 
-      - run: npm ci
+      - name: Install deps
+        env:
+          INSTALL_CMD: ${{ needs.dispatch.outputs.install_command }}
+        run: bash -c "$INSTALL_CMD"
 
       # 一番直近の versions upload を 100% に振る。Phase 5 で stage 時に
       # 取得した version_id を client_payload 経由で受け取って明示指定する
@@ -386,7 +397,10 @@ jobs:
         with:
           node-version: '20'
 
-      - run: npm ci
+      - name: Install deps
+        env:
+          INSTALL_CMD: ${{ needs.dispatch.outputs.install_command }}
+        run: bash -c "$INSTALL_CMD"
 
       - name: wrangler rollback
         env:
