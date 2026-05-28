@@ -3,17 +3,40 @@ name: Auto Merge
 on:
   workflow_call:
     secrets:
+      CI_APP_ID:
+        description: |
+          GitHub App ID (org secret). When set together with
+          `CI_APP_PRIVATE_KEY`, an installation access token is minted at
+          runtime via `actions/create-github-app-token` and used in
+          preference to any PAT below.
+
+          Why this is preferred: a merge performed with an App token pushes
+          the `push: main` (and `pull_request: closed`) events as the App
+          actor — NOT `github-actions[bot]` — so downstream workflows
+          (release.yml chain, dev-tag-release, post-merge close jobs) DO
+          fire. The App's installation permissions (Contents / Pull requests
+          / Workflows = write) also cover merging PRs that touch
+          `.github/workflows/**`. And the App has its own rate-limit bucket,
+          so it does not exhaust an individual user's 5,000 pts/hr GraphQL
+          quota (the cause of the intermittent "API rate limit already
+          exceeded for user ID" failures on `gh pr merge --auto`).
+        required: false
+      CI_APP_PRIVATE_KEY:
+        description: |
+          PEM private key for the GitHub App identified by `CI_APP_ID`
+          (org secret, multi-line). Required alongside `CI_APP_ID`.
+        required: false
       AUTO_MERGE_PAT:
         description: |
-          Optional PAT (legacy name). If set, takes precedence over
+          Optional PAT (legacy name). Fallback used only when the GitHub App
+          secrets above are not set. If set, takes precedence over
           `TAG_RELEASE_PAT`. Both fall back to `github.token` when unset.
         required: false
       TAG_RELEASE_PAT:
         description: |
           Org-standard PAT used across `tag-release.yml` /
-          `dev-tag-release.yml`. Recommended — set this once at org level
-          and `auto-merge.yml` picks it up automatically (no need to mint a
-          separate `AUTO_MERGE_PAT`). Required scopes: `repo` + `workflow`
+          `dev-tag-release.yml`. Fallback used only when the GitHub App
+          secrets are not set. Required scopes: `repo` + `workflow`
           (classic) or Contents/PR/Workflow Read-Write (fine-grained).
           `workflow` scope is required to merge PRs that touch
           `.github/workflows/**` — without it the merge mutation fails with
@@ -29,28 +52,33 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    env:
+      # App ID は数値で非機密。step `if:` の gate に使うため job-level env に置く
+      # (env context は if で参照可、secrets context は不可)。private key は
+      # env に置かず create-github-app-token の `with:` に直接渡す。
+      CI_APP_ID: ${{ secrets.CI_APP_ID }}
     steps:
+      # GitHub App installation token を mint (org が CI_APP_ID/KEY を設定済の時)。
+      # 未設定の caller は skip され、下の GH_TOKEN は PAT → github.token に fallback
+      # するので後方互換。
+      - name: Mint GitHub App installation token (preferred over PAT)
+        id: app-token
+        if: env.CI_APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+
       - name: Check mergeable and queue squash merge
         env:
-          # Prefer PAT (AUTO_MERGE_PAT alias > TAG_RELEASE_PAT canonical) when
-          # the caller passes one — that makes the resulting merge commit
-          # `push: main` event a non-GITHUB_TOKEN actor, which IS allowed to
-          # trigger downstream workflows (release.yml chain, post-merge
-          # `pull_request: closed` jobs, etc).
-          #
-          # Without this, `gh pr merge --auto` queues the merge under
-          # GITHUB_TOKEN, the auto-merge engine pushes the merge commit as
-          # github-actions[bot], and the resulting push / closed events are
-          # silently dropped by Actions ("GITHUB_TOKEN events do not trigger
-          # workflows"). This was the silent skip observed for
-          # ippoan/mcp-relay-rs#22 / #24 merges (dev-release.yml not firing,
-          # see ippoan/mcp-relay-rs#21).
-          #
-          # Falls back to `github.token` if neither PAT secret is set, so
-          # callers that genuinely don't have / want a PAT keep working
-          # (they just lose the downstream-workflow chain — same as old
-          # behavior).
-          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || secrets.TAG_RELEASE_PAT || github.token }}
+          # 優先順位: App token > AUTO_MERGE_PAT > TAG_RELEASE_PAT > github.token。
+          # App token / PAT は merge commit の push actor を非 GITHUB_TOKEN にする
+          # ため、resulting `push: main` / `pull_request: closed` イベントが
+          # downstream workflow を発火させられる (= release.yml chain 等)。
+          # github.token だと github-actions[bot] 扱いになり Actions に無視される
+          # (ippoan/mcp-relay-rs#21 の silent skip 実害)。App token なら個人 PAT の
+          # GraphQL クォータも食わない (rate-limit cosmetic fail 回避)。
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.AUTO_MERGE_PAT || secrets.TAG_RELEASE_PAT || github.token }}
         run: |
           PR=${{ github.event.number }}
           REPO=${{ github.repository }}
