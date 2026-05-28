@@ -171,6 +171,16 @@ on:
         required: false
         type: string
         default: 'https://ci-dashboard.ippoan.org'
+      compat_backend_image_env:
+        description: >-
+          integration test の docker-compose が backend image tag/ref を読む env
+          変数名 (例: API_IMAGE)。compat_backend_repo と併用すると、test 前に解決
+          した backend SHA を `<this>=ghcr.io/<compat_backend_repo>:<sha>` として
+          export し、**記録する SHA と同じ image で integration test を回す**
+          (truthful 突合)。空なら compose は自前の default tag を使う (従来挙動)。
+        required: false
+        type: string
+        default: ''
     secrets:
       CLOUDFLARE_API_TOKEN:
         description: Cloudflare API token for wrangler deploy
@@ -691,6 +701,10 @@ jobs:
       inputs.has_integration &&
       (needs.pr-limit.result == 'success' || needs.pr-limit.result == 'skipped')
     runs-on: ubuntu-latest
+    outputs:
+      # 解決した backend image SHA。report-compatibility がこれを記録するので、
+      # 「test した image == 記録 image」が保証される (truthful 突合)。
+      backend_image: ${{ steps.resolve-backend.outputs.image }}
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
@@ -740,6 +754,45 @@ jobs:
           curl -sfL "https://raw.githubusercontent.com/ippoan/rust-alc-api/main/scripts/init_local_db.sql" \
             -o tests/fixtures/init_local_db.sql
 
+      # compat_backend_repo 指定時、記録対象の backend SHA を test 前に解決する。
+      # compat_backend_image_env が指定されていれば、その env 名で
+      # `ghcr.io/<repo>:<sha>` を export し、compose が **記録する SHA と同じ
+      # image** で API を立てる (truthful 突合)。SHA が解決できなければ何もせず
+      # compose は自前 default に従う (従来挙動)。出力 `image` は
+      # report-compatibility が記録 SHA として使う。
+      - name: Resolve backend image (compatibility)
+        id: resolve-backend
+        if: inputs.compat_backend_repo != ''
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
+          BACKEND_REPO: ${{ inputs.compat_backend_repo }}
+          BACKEND_IMAGE: ${{ inputs.compat_backend_image }}
+          IMAGE_ENV_NAME: ${{ inputs.compat_backend_image_env }}
+          WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          image="$BACKEND_IMAGE"
+          if [[ -z "$image" && -n "$WEBHOOK_SECRET" ]]; then
+            url="$CI_DASHBOARD_BASE/webhooks/release-wave/backend-current-image?repo=$BACKEND_REPO"
+            resp=$(curl -sS -w '\n%{http_code}' \
+              -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" "$url" || echo $'\n000')
+            code=$(printf '%s' "$resp" | tail -1)
+            body=$(printf '%s' "$resp" | sed '$d')
+            if [[ "$code" == "200" ]]; then
+              image=$(printf '%s' "$body" | jq -r '.current_image // ""')
+            else
+              echo "::notice::backend-current-image returned $code; integration test will use compose default image."
+            fi
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          # compose の image env を、解決した SHA で上書き (env 名が指定された時のみ)。
+          # env 名は caller config (trusted)。値は jq 由来の SHA。
+          if [[ -n "$image" && -n "$IMAGE_ENV_NAME" ]]; then
+            echo "${IMAGE_ENV_NAME}=ghcr.io/${BACKEND_REPO}:${image}" >> "$GITHUB_ENV"
+            echo "::notice::integration test will run against ghcr.io/${BACKEND_REPO}:${image} (recorded SHA)"
+          fi
+
       - name: Start API + DB containers
         run: docker compose -f ${{ inputs.integration_compose_file }} up -d --wait
         timeout-minutes: 5
@@ -778,7 +831,9 @@ jobs:
         with:
           ci_dashboard_base_url: ${{ inputs.ci_dashboard_base_url }}
           backend_repo: ${{ inputs.compat_backend_repo }}
-          backend_image: ${{ inputs.compat_backend_image }}
+          # integration-test が解決・使用した SHA をそのまま記録する (test した
+          # image == 記録 image)。明示 input があればそれを優先 (retest 経路)。
+          backend_image: ${{ inputs.compat_backend_image != '' && inputs.compat_backend_image || needs.integration-test.outputs.backend_image }}
           prod_version: ${{ github.ref_name }}
           webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
 
