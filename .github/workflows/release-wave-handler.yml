@@ -270,20 +270,14 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash -c "$INSTALL_CMD"
 
-      # tag を打って push。これが「stage された code の immutable ref」になる
-      # ので flip 時に再 checkout で参照される。
-      - name: Tag + push
-        env:
-          TARGET_TAG: ${{ needs.dispatch.outputs.target_tag }}
-        run: |
-          set -euo pipefail
-          git config user.email "release-wave@ippoan.org"
-          git config user.name "Release Wave"
-          # idempotent: 同 tag が既に存在しても fail させない (= retry-friendly)
-          if ! git rev-parse "$TARGET_TAG" >/dev/null 2>&1; then
-            git tag "$TARGET_TAG"
-            git push origin "$TARGET_TAG"
-          fi
+      # NOTE (Refs ippoan/ci-dashboard#174): release-wave は `v*` git tag を
+      # 打たない。`v*` タグは tag-release.yml (workflow_dispatch) が唯一の
+      # owner で、release-wave が同名前空間を push すると (1) tag-release と
+      # 混同し、(2) handler は GITHUB_TOKEN で push するため tag 起因の release
+      # workflow / GitHub Release が発火せず「死んだ orphan タグ」になる。
+      # 本 flow は head_sha を immutable ref として stage/flip し、確定後に
+      # 別途 tag-release で正式 `v*` を打つ運用。target_tag は wave のラベル /
+      # compat current_image としてのみ使う (git tag は作らない)。
 
       # flip 前に 100% traffic を持っている version id を rollback の戻し先
       # (flip_from_revision) として控える。best-effort: 取得できなくても stage
@@ -443,9 +437,12 @@ jobs:
     if: needs.dispatch.outputs.event_type == 'release-wave-flip' && needs.dispatch.outputs.platform == 'cloudflare-workers'
     runs-on: ubuntu-latest
     steps:
+      # head_sha を checkout (release-wave は v* tag を打たないため、stage と同じ
+      # immutable ref を使う)。flip 自体は previewed_version_id を直接 deploy する
+      # ので、この checkout は wrangler.toml / deps を置くためだけ。Refs #174。
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.dispatch.outputs.target_tag }}
+          ref: ${{ needs.dispatch.outputs.head_sha }}
 
       - uses: actions/setup-node@v4
         with:
