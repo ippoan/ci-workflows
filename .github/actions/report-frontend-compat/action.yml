@@ -16,8 +16,9 @@ inputs:
   backend_image:
     description: >-
       test 相手の backend image identifier。空なら ci-dashboard の
-      `GET /backend-current-image` で現 production image を取りに行く
-      (= 通常 PR CI の経路)。retest 経路では dispatch payload の値を渡す。
+      `GET /webhooks/release-wave/backend-current-image` (shared secret 認証) で
+      現 production image を取りに行く (= 通常 PR CI の経路)。
+      retest 経路では dispatch payload の値を渡す。
     required: false
     default: ''
   prod_version:
@@ -56,9 +57,15 @@ runs:
         # image 未指定 (通常 PR CI) は現 production backend image を取りに行く。
         # backend record がまだ無い (404) / endpoint 不通なら、test 対象 image を
         # 確定できないので報告を skip する (誤った image を記録しない)。
+        #
+        # 注意: shared-secret 認証付きの /webhooks/release-wave/backend-current-image
+        # を使う。CF Access edge gate は /webhooks/* を bypass するため Actions
+        # runner から到達できる。CF Access 下の素の /backend-current-image は
+        # GitHub Actions から 302 で遮断される (Refs ippoan/ci-dashboard#157/#165)。
         if [[ -z "$image" ]]; then
-          url="$CI_DASHBOARD_BASE/backend-current-image?repo=$BACKEND_REPO"
-          resp=$(curl -sS -w '\n%{http_code}' "$url" || echo $'\n000')
+          url="$CI_DASHBOARD_BASE/webhooks/release-wave/backend-current-image?repo=$BACKEND_REPO"
+          resp=$(curl -sS -w '\n%{http_code}' \
+            -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" "$url" || echo $'\n000')
           code=$(printf '%s' "$resp" | tail -1)
           body=$(printf '%s' "$resp" | sed '$d')
           if [[ "$code" != "200" ]]; then
