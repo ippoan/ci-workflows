@@ -47,6 +47,11 @@ on:
         required: false
         type: string
         default: 'main'
+      release_wave_gcp_base_url:
+        description: 'release-wave-gcp Cloud Run service URL (cloudrun path のみ)'
+        required: false
+        type: string
+        default: 'https://release-wave-gcp-staging-566bls5vfq-an.a.run.app'
 
 permissions:
   contents: write       # tag push
@@ -400,15 +405,129 @@ jobs:
       # 進捗確認のため別途 ci-dashboard を更新する想定。
 
   # =========================================================================
-  # Cloud Run path — Phase 4c で release-wave-gcp 経由で実装予定
+  # Cloud Run path (Phase 4c)
+  #
+  # Stage は repo 側 deploy.yml の修正 (= --no-traffic --tag pending-<...>
+  # オプション付きで Cloud Run revision を deploy する) を前提とする。
+  # 本 reusable は build/deploy をやらず、tag push のみ実施し、stage-check
+  # で revision が Ready になるまで poll して callback する。
+  #
+  # Flip / Rollback は release-wave-gcp Cloud Run proxy を経由して
+  # gcloud run services update-traffic 等価操作を行う。各 service に対して
+  # matrix で並列実行し、全 service 完了後に callback。
   # =========================================================================
+
+  # ---- Stage (cloudrun) ----
   stage-cloudrun:
-    name: Stage (cloudrun) [TODO Phase 4c]
+    name: Stage (cloudrun)
     needs: dispatch
     if: needs.dispatch.outputs.event_type == 'release-wave-stage' && needs.dispatch.outputs.platform == 'cloudrun'
     runs-on: ubuntu-latest
     steps:
-      - name: Not implemented
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.dispatch.outputs.head_sha }}
+
+      # tag push (= release-wave-handler 共通の immutable ref 確立)。
+      # 実際の Cloud Run deploy は repo の deploy.yml 側に任せる (= 既存の
+      # tag-release 経路を踏襲)。Phase 5 で deploy.yml に --no-traffic
+      # --tag pending-<sanitized> オプションを足す必要あり。
+      - name: Tag + push
+        env:
+          TARGET_TAG: ${{ needs.dispatch.outputs.target_tag }}
+        run: |
+          set -euo pipefail
+          git config user.email "release-wave@ippoan.org"
+          git config user.name "Release Wave"
+          if ! git rev-parse "$TARGET_TAG" >/dev/null 2>&1; then
+            git tag "$TARGET_TAG"
+            git push origin "$TARGET_TAG"
+          fi
+
+      # stage-check で各 service の最新 revision が Ready になるまで poll。
+      # service 一覧は targets.yaml の services[]、release-wave-gcp の
+      # /cloudrun/stage-check を順次叩く (= 並列にする必要は無い、各 service
+      # の deploy は順次なので poll も sequential)。
+      - name: Wait for services to become Ready (stage-check poll)
+        env:
+          SERVICES_JSON: ${{ needs.dispatch.outputs.services_json }}
+          GCP_PROJECT: ${{ needs.dispatch.outputs.gcp_project }}
+          GCP_REGION: ${{ needs.dispatch.outputs.gcp_region }}
+          GCP_BASE: ${{ inputs.release_wave_gcp_base_url }}
+          GCP_API_KEY: ${{ secrets.RELEASE_WAVE_GCP_API_KEY }}
+        run: |
+          set -euo pipefail
+          # 30 秒間隔で最大 20 分 poll (= Cloud Run 大規模 deploy の余裕)
+          TIMEOUT_SECONDS=1200
+          INTERVAL_SECONDS=30
+          deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+          services=$(printf '%s' "$SERVICES_JSON" | jq -r '.[]')
+          for service in $services; do
+            echo "::group::Waiting for $service to be Ready"
+            while true; do
+              now=$(date +%s)
+              if (( now > deadline )); then
+                echo "::error::timeout waiting for $service to be Ready"
+                exit 1
+              fi
+              body=$(jq -nc \
+                --arg project "$GCP_PROJECT" \
+                --arg region "$GCP_REGION" \
+                --arg service "$service" \
+                '{project: $project, region: $region, service: $service}')
+              resp=$(curl -sS -w '\n%{http_code}' -X POST \
+                "$GCP_BASE/cloudrun/stage-check" \
+                -H "X-Release-Wave-API-Key: $GCP_API_KEY" \
+                -H "Content-Type: application/json" \
+                -d "$body" || echo $'\n000')
+              http_code=$(printf '%s' "$resp" | tail -1)
+              body=$(printf '%s' "$resp" | sed '$d')
+              if [[ "$http_code" != "200" ]]; then
+                echo "stage-check returned $http_code; will retry"
+                sleep "$INTERVAL_SECONDS"
+                continue
+              fi
+              ready=$(printf '%s' "$body" | jq -r '.status.ready // false')
+              if [[ "$ready" == "true" ]]; then
+                echo "$service is Ready"
+                break
+              fi
+              sleep "$INTERVAL_SECONDS"
+            done
+            echo "::endgroup::"
+          done
+
+      - name: Callback stage-report
+        env:
+          WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
+          REPO: ${{ github.repository }}
+          PREVIEW_URL: https://${{ needs.dispatch.outputs.preview_hostname }}
+          CALLBACK: ${{ inputs.callback_base_url }}
+          WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+          # cloudrun の場合 flip_from_revision を services 単位で取る必要が
+          # あるが、現状 DO state machine は per-repo (= 1 revision string) で
+          # しか保持しない。Phase 5 で multi-service rollback target を表現
+          # する schema に拡張する。当面 service 名の list を JSON 文字列
+          # として flip_from_revision に詰める (= rollback 時に caller が
+          # parse する想定)。
+          SERVICES_JSON: ${{ needs.dispatch.outputs.services_json }}
+        run: |
+          set -euo pipefail
+          flip_from=$(printf '%s' "$SERVICES_JSON" | jq -c .)
+          payload=$(jq -nc \
+            --arg wave_id "$WAVE_ID" \
+            --arg repo "$REPO" \
+            --arg preview_url "$PREVIEW_URL" \
+            --arg flip_from_revision "$flip_from" \
+            '{wave_id: $wave_id, repo: $repo, ok: true,
+              preview_url: $preview_url, flip_from_revision: $flip_from_revision}')
+          curl -fsS -X POST "$CALLBACK/webhooks/release-wave/stage-report" \
+            -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$payload"
+
+      - name: Callback stage-report (on failure)
+        if: failure()
         env:
           WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
           REPO: ${{ github.repository }}
@@ -416,34 +535,149 @@ jobs:
           WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
-          echo "::warning::cloudrun stage path not implemented yet (Phase 4c)"
-          # 進行をブロックしないよう ok=false で callback して wave を fail させる
           payload=$(jq -nc \
             --arg wave_id "$WAVE_ID" --arg repo "$REPO" \
-            --arg error "cloudrun stage path not implemented (Phase 4c TODO)" \
+            --arg error "cloudrun stage failed (timeout or upstream error); see Actions log" \
             '{wave_id: $wave_id, repo: $repo, ok: false, error: $error}')
           curl -fsS -X POST "$CALLBACK/webhooks/release-wave/stage-report" \
             -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
             -H "Content-Type: application/json" \
             -d "$payload" || true
-          exit 1
 
+  # ---- Flip (cloudrun): matrix で services[] 並列 ----
   flip-cloudrun:
-    name: Flip (cloudrun) [TODO Phase 4c]
+    name: Flip (cloudrun) [${{ matrix.service }}]
     needs: dispatch
     if: needs.dispatch.outputs.event_type == 'release-wave-flip' && needs.dispatch.outputs.platform == 'cloudrun'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false  # 1 service 失敗で全 cancel しない
+      matrix:
+        service: ${{ fromJSON(needs.dispatch.outputs.services_json) }}
     steps:
-      - run: |
-          echo "::warning::cloudrun flip path not implemented yet (Phase 4c)"
-          exit 1
+      - name: Sanitize tag for revision tag
+        id: sanitize
+        env:
+          TARGET_TAG: ${{ needs.dispatch.outputs.target_tag }}
+        run: |
+          set -euo pipefail
+          # Cloud Run revision tag は `[a-z0-9-]{1,63}` 制約 (lowercase only)。
+          # target_tag (e.g. v1.42.0) を `pending-v1-42-0` 形に変換する。
+          sanitized=$(printf '%s' "$TARGET_TAG" | tr 'A-Z' 'a-z' | tr '.' '-')
+          echo "tag=pending-${sanitized}" >> "$GITHUB_OUTPUT"
 
+      - name: Call release-wave-gcp /cloudrun/flip-traffic
+        env:
+          GCP_PROJECT: ${{ needs.dispatch.outputs.gcp_project }}
+          GCP_REGION: ${{ needs.dispatch.outputs.gcp_region }}
+          SERVICE: ${{ matrix.service }}
+          TO_TAG: ${{ steps.sanitize.outputs.tag }}
+          GCP_BASE: ${{ inputs.release_wave_gcp_base_url }}
+          GCP_API_KEY: ${{ secrets.RELEASE_WAVE_GCP_API_KEY }}
+        run: |
+          set -euo pipefail
+          body=$(jq -nc \
+            --arg project "$GCP_PROJECT" \
+            --arg region "$GCP_REGION" \
+            --arg service "$SERVICE" \
+            --arg to_revision_tag "$TO_TAG" \
+            '{project: $project, region: $region, service: $service,
+              to_revision_tag: $to_revision_tag}')
+          curl -fsS -X POST "$GCP_BASE/cloudrun/flip-traffic" \
+            -H "X-Release-Wave-API-Key: $GCP_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$body"
+
+  # ---- Flip callback (cloudrun): 全 service 完了後に 1 度だけ呼ぶ ----
+  flip-cloudrun-callback:
+    name: Flip callback (cloudrun)
+    needs: [dispatch, flip-cloudrun]
+    if: |
+      always() &&
+      needs.dispatch.outputs.event_type == 'release-wave-flip' &&
+      needs.dispatch.outputs.platform == 'cloudrun'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Callback flip-report
+        env:
+          WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
+          REPO: ${{ github.repository }}
+          CALLBACK: ${{ inputs.callback_base_url }}
+          WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+          MATRIX_RESULT: ${{ needs.flip-cloudrun.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$MATRIX_RESULT" == "success" ]]; then
+            payload=$(jq -nc \
+              --arg wave_id "$WAVE_ID" --arg repo "$REPO" \
+              '{wave_id: $wave_id, repo: $repo, ok: true}')
+          else
+            payload=$(jq -nc \
+              --arg wave_id "$WAVE_ID" --arg repo "$REPO" \
+              --arg error "cloudrun flip matrix result=$MATRIX_RESULT" \
+              '{wave_id: $wave_id, repo: $repo, ok: false, error: $error}')
+          fi
+          curl -fsS -X POST "$CALLBACK/webhooks/release-wave/flip-report" \
+            -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$payload"
+
+  # ---- Rollback (cloudrun): matrix で services[] 並列 ----
   rollback-cloudrun:
-    name: Rollback (cloudrun) [TODO Phase 4c]
+    name: Rollback (cloudrun) [${{ matrix.service }}]
     needs: dispatch
     if: needs.dispatch.outputs.event_type == 'release-wave-rollback' && needs.dispatch.outputs.platform == 'cloudrun'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.dispatch.outputs.services_json) }}
     steps:
-      - run: |
-          echo "::warning::cloudrun rollback path not implemented yet (Phase 4c)"
-          exit 1
+      # rollback の戻し先 revision は client_payload.rollback_target.<service>
+      # で受け取る想定 (= ci-dashboard 側 dispatcher 実装時に決定)。
+      # 現状未実装なので env で固定し、見つからなければ "latest-stable" を
+      # 文字列で渡す (release-wave-gcp 側で validate)。
+      - name: Resolve rollback target revision
+        id: target
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+          to_revision=$(printf '%s' "$PAYLOAD" \
+            | jq -r --arg s "$SERVICE" '.rollback_target[$s] // ""')
+          if [[ -z "$to_revision" ]]; then
+            echo "::error::rollback target for $SERVICE missing in client_payload.rollback_target"
+            exit 1
+          fi
+          # short-form / full-form 両許可。形式検証: lowercase + digit + - のみ。
+          if ! [[ "$to_revision" =~ ^[a-z0-9-]{1,256}$ ]]; then
+            echo "::error::to_revision for $SERVICE has invalid format"
+            exit 1
+          fi
+          echo "to_revision=$to_revision" >> "$GITHUB_OUTPUT"
+
+      - name: Call release-wave-gcp /cloudrun/rollback
+        env:
+          GCP_PROJECT: ${{ needs.dispatch.outputs.gcp_project }}
+          GCP_REGION: ${{ needs.dispatch.outputs.gcp_region }}
+          SERVICE: ${{ matrix.service }}
+          TO_REVISION: ${{ steps.target.outputs.to_revision }}
+          GCP_BASE: ${{ inputs.release_wave_gcp_base_url }}
+          GCP_API_KEY: ${{ secrets.RELEASE_WAVE_GCP_API_KEY }}
+        run: |
+          set -euo pipefail
+          body=$(jq -nc \
+            --arg project "$GCP_PROJECT" \
+            --arg region "$GCP_REGION" \
+            --arg service "$SERVICE" \
+            --arg to_revision "$TO_REVISION" \
+            '{project: $project, region: $region, service: $service,
+              to_revision: $to_revision}')
+          curl -fsS -X POST "$GCP_BASE/cloudrun/rollback" \
+            -H "X-Release-Wave-API-Key: $GCP_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$body"
+      # rollback callback は state machine 上は無いため省略 (= release_wave_rollback
+      # MCP tool が caller-driven で state を rolled-back に進めた後、本 job が
+      # 副作用として実 traffic 戻しを行う構造)。
