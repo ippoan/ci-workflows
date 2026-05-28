@@ -269,8 +269,11 @@ jobs:
             echo "::warning::could not resolve current active version; rollback will fall back to 'wrangler rollback'"
           fi
 
-      # wrangler versions upload (no-traffic deploy)。stdout から Version ID
-      # を抽出する。これが「preview 済みの version」= flip 対象 (previewed_version_id)。
+      # wrangler versions upload (no-traffic deploy)。stdout から Version ID と
+      # workers.dev の Version Preview URL を抽出する。Version ID は「preview 済みの
+      # version」= flip 対象 (previewed_version_id)。Preview URL は実際にアクセス
+      # できる no-traffic preview の URL (= wrangler が `Version Preview URL:` 行で
+      # 出力する <hash>-<worker>.<subdomain>.workers.dev)。
       - name: wrangler versions upload (no-traffic stage)
         id: stage
         env:
@@ -286,23 +289,57 @@ jobs:
             exit 1
           fi
           echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
+          # `Version Preview URL:` 行の workers.dev URL を拾う (preview_urls 無効 /
+          # workers.dev subdomain 無しの repo では出力されない → 空のまま fallback)。
+          WV_PREVIEW=$(printf '%s' "$OUT" | grep -iE 'preview url' | grep -oiE 'https://[a-z0-9._-]+\.workers\.dev[^[:space:]]*' | head -1 || true)
+          echo "wv_preview_url=$WV_PREVIEW" >> "$GITHUB_OUTPUT"
 
-      # Preview URL は wrangler 既定の version preview URL を採用。
-      # https://<8 char prefix>-<worker>.<subdomain>.workers.dev
-      # subdomain が無い repo は preview_hostname を fallback で使う (= 操作者は
-      # /release-wave/<wave_id> から hostname を確認、CF Access policy が
-      # preview-* に被さっていれば認証経由でアクセスできる)。
+      # Preview URL は wrangler が出す workers.dev の Version Preview URL を最優先で
+      # 使う (= no-traffic version に実際にアクセスできる URL)。それが無い repo
+      # (workers.dev subdomain / preview_urls 無効) のみ、設定の preview_hostname
+      # (preview-*.ippoan.org) に fallback する。preview_hostname は DNS / CF Access
+      # wildcard が別途設定されている前提なので、未設定だと解決できない点に注意。
       - name: Compose preview URL
         id: preview
         env:
-          VERSION_ID: ${{ steps.stage.outputs.version_id }}
+          WV_PREVIEW_URL: ${{ steps.stage.outputs.wv_preview_url }}
           PREVIEW_HOSTNAME: ${{ needs.dispatch.outputs.preview_hostname }}
         run: |
           set -euo pipefail
-          # 第一候補: preview_hostname (CF Access wildcard for preview-*.ippoan.org)
-          # 第二候補: workers.dev version URL (subdomain 必要)
-          PREVIEW_URL="https://${PREVIEW_HOSTNAME}"
+          if [[ -n "$WV_PREVIEW_URL" ]]; then
+            PREVIEW_URL="$WV_PREVIEW_URL"
+          elif [[ -n "$PREVIEW_HOSTNAME" ]]; then
+            PREVIEW_URL="https://${PREVIEW_HOSTNAME}"
+          else
+            PREVIEW_URL=""
+          fi
           echo "preview_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
+
+      # preview URL が実際にアクセスできるか CI で確認する。DNS 不解決 / 接続不可
+      # (= http_code 000) は preview として無価値なので stage を fail させ、wave を
+      # 進めない。auth gate 等で 401/403/404 を返すのは「到達できている」とみなして
+      # OK (= worker が応答している証拠)。version preview URL の伝播待ちで数回 retry。
+      - name: Verify preview URL is reachable
+        if: steps.preview.outputs.preview_url != ''
+        env:
+          PREVIEW_URL: ${{ steps.preview.outputs.preview_url }}
+        run: |
+          set -euo pipefail
+          attempt=0
+          max=5
+          code=000
+          while (( attempt < max )); do
+            attempt=$((attempt + 1))
+            code=$(curl -sS -L --max-time 15 -o /dev/null -w '%{http_code}' "$PREVIEW_URL" || echo 000)
+            if [[ "$code" != "000" ]]; then
+              echo "preview reachable: $PREVIEW_URL (HTTP $code)"
+              exit 0
+            fi
+            echo "attempt $attempt/$max: preview not reachable yet (DNS/connection failure); retrying..."
+            sleep $((attempt * 3))
+          done
+          echo "::error::preview URL not reachable after $max attempts: $PREVIEW_URL (last code=$code). DNS 未解決 / route 未設定の可能性。"
+          exit 1
 
       - name: Callback stage-report
         env:
