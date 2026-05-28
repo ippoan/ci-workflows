@@ -55,6 +55,18 @@ on:
         description: 'Override release deploy script (default: auto by project_type)'
         type: string
         default: ''
+      release_no_traffic:
+        description: |
+          v* リリースを no-traffic で deploy する (全 frontend 共通の既定挙動)。
+          true (default) の場合、release deploy の `wrangler deploy` を
+          `wrangler versions deploy` ではなく **`wrangler versions upload`**
+          (no-traffic version 作成) に置換する。本番 traffic は変わらず、flip は
+          Cloudflare ダッシュボード (Workers > Deployments で version を 100% に
+          promote) か `npx wrangler versions deploy <version-id>@100% --yes` で
+          明示的に行う。即 100% deploy に戻したい repo は false を渡す。
+          Refs ippoan/ci-dashboard#174。
+        type: boolean
+        default: true
       integration_compose_file:
         description: Docker Compose file for integration tests
         type: string
@@ -1145,15 +1157,28 @@ jobs:
       - name: Deploy to production
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          RELEASE_SCRIPT: ${{ inputs.deploy_release_script }}
+          PROJECT_TYPE: ${{ inputs.project_type }}
+          RELEASE_NO_TRAFFIC: ${{ inputs.release_no_traffic }}
         run: |
-          CMD="${{ inputs.deploy_release_script }}"
+          CMD="$RELEASE_SCRIPT"
           if [ -z "$CMD" ]; then
-            if [ "${{ inputs.project_type }}" = "worker" ]; then
+            if [ "$PROJECT_TYPE" = "worker" ]; then
               CMD="npx wrangler deploy"
             else
               CMD="npm run build && npx wrangler deploy"
             fi
           fi
+          # 全 frontend 共通 no-traffic release (Refs ippoan/ci-dashboard#174):
+          # `wrangler deploy` (= 即 100% traffic) を `wrangler versions upload`
+          # (no-traffic version 作成) に置換する。traffic flip は Cloudflare
+          # ダッシュボード / `wrangler versions deploy <id>@100%` で明示的に行う。
+          # `wrangler versions upload` は --var / --env 等の flag をそのまま受ける
+          # ので、caller の deploy_release_script の置換で足りる。
+          if [ "$RELEASE_NO_TRAFFIC" = "true" ]; then
+            CMD="${CMD//wrangler deploy/wrangler versions upload}"
+          fi
+          echo "release deploy: $CMD"
           eval "$CMD"
 
   publish-dev:
