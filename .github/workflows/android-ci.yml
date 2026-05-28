@@ -1,0 +1,54 @@
+name: Android CI
+# Reusable Android CI: PR gate で APK debug build + Android lint を走らせる。
+#
+# 呼び出し側 caller の job id を `ci` にすると status check は
+#   `ci / Build APK` / `ci / Lint`
+# になり、`ippoan-android-default` branch-protection preset の required check と
+# 一致する (status check 名 = caller job 名 + ' / ' + reusable job 名)。
+#
+# debug build (`assembleDebug`) は署名 secret 不要 (debug 自動署名)。BuildConfig の
+# WORKER_URL / UPLOAD_TOKEN も build.gradle.kts の cfg() default が効くため secret
+# 無しで通る。Android SDK は ubuntu-latest にプリインストール済み。
+#
+# Refs ippoan/HealthConnectReader#28
+
+on:
+  workflow_call:
+    inputs:
+      java_version:
+        description: Temurin JDK version。
+        default: '17'
+        type: string
+      working_directory:
+        description: Gradle project root (wrapper `gradlew` のある dir)。
+        default: '.'
+        type: string
+
+jobs:
+  build-apk:
+    name: Build APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build APK (debug)
+        working-directory: ${{ inputs.working_directory }}
+        run: ./gradlew assembleDebug --console=plain
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Android lint
+        working-directory: ${{ inputs.working_directory }}
+        run: ./gradlew lint --console=plain
