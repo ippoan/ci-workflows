@@ -40,6 +40,10 @@ targets:
     # auth-worker は test.yml で install_command: 'npm install' を選択している
     # (lock の strict 同期を要求しない運用)。release-wave handler でも揃える。
     install_command: 'npm install --no-audit --no-fund'
+    # @ippoan/* (= GitHub Packages private dep, e.g. @ippoan/egov-shinsei-sdk)
+    # を install するため。setup-node の registry-url + scope + NODE_AUTH_TOKEN
+    # 設定に反映される。
+    npm_scope: '@ippoan'
 
   # nuxt-notify は 3 unit monorepo (app / email / realtime)。
   # 各 unit を independent な CF Workers として stage / flip する。
