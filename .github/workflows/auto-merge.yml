@@ -1,4 +1,5 @@
 name: Auto Merge
+# smoke: verify App-token mint on the new auto-merge path (ippoan-ci-bot). Refs #65
 
 on:
   workflow_call:
