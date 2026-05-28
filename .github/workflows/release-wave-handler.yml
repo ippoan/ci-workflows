@@ -245,8 +245,32 @@ jobs:
             git push origin "$TARGET_TAG"
           fi
 
+      # flip 前に 100% traffic を持っている version id を rollback の戻し先
+      # (flip_from_revision) として控える。best-effort: 取得できなくても stage
+      # は続行する (rollback 時に `wrangler rollback` へ fallback する)。
+      # `deployments status` (現 active deployment) を優先し、無ければ
+      # `deployments list` から拾う。version id は UUID 形式。
+      - name: Resolve current active version (rollback target)
+        id: active
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ needs.dispatch.outputs.cf_account_id }}
+        run: |
+          set -uo pipefail
+          UUID_RE='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+          ACTIVE=$(npx wrangler deployments status 2>/dev/null | grep -oiE "$UUID_RE" | head -1 || true)
+          if [[ -z "$ACTIVE" ]]; then
+            ACTIVE=$(npx wrangler deployments list 2>/dev/null | grep -oiE "$UUID_RE" | tail -1 || true)
+          fi
+          echo "version_id=$ACTIVE" >> "$GITHUB_OUTPUT"
+          if [[ -n "$ACTIVE" ]]; then
+            echo "current active version (rollback target): $ACTIVE"
+          else
+            echo "::warning::could not resolve current active version; rollback will fall back to 'wrangler rollback'"
+          fi
+
       # wrangler versions upload (no-traffic deploy)。stdout から Version ID
-      # を抽出して preview URL の生成と flip ステップへ渡す。
+      # を抽出する。これが「preview 済みの version」= flip 対象 (previewed_version_id)。
       - name: wrangler versions upload (no-traffic stage)
         id: stage
         env:
@@ -285,22 +309,27 @@ jobs:
           WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
           REPO: ${{ github.repository }}
           PREVIEW_URL: ${{ steps.preview.outputs.preview_url }}
-          VERSION_ID: ${{ steps.stage.outputs.version_id }}
+          # previewed_version_id = stage で no-traffic upload した version (= flip 対象)
+          PREVIEWED_VERSION_ID: ${{ steps.stage.outputs.version_id }}
+          # flip_from_revision = flip 前に active だった version (= rollback 戻し先)。
+          # 取得できなかった場合は空文字 (下で payload から落とす)。
+          FLIP_FROM_REVISION: ${{ steps.active.outputs.version_id }}
           CALLBACK: ${{ inputs.callback_base_url }}
           WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
-          # flip_from_revision = 現在 active な version の ID (= rollback 時の戻し先)
-          # ここでは取得を省略 (TODO: wrangler versions list で active を解決)
-          # 当面 stage 時の version_id を flip_from_revision として送る = stage
-          # 前の latest を rollback 先として記録するロジックは Phase 5 で改善。
+          # 空文字の field は payload から除外する (= webhook 側で null 扱いにする)。
           payload=$(jq -nc \
             --arg wave_id "$WAVE_ID" \
             --arg repo "$REPO" \
             --arg preview_url "$PREVIEW_URL" \
-            --arg flip_from_revision "$VERSION_ID" \
+            --arg flip_from_revision "$FLIP_FROM_REVISION" \
+            --arg previewed_version_id "$PREVIEWED_VERSION_ID" \
             '{wave_id: $wave_id, repo: $repo, ok: true,
-              preview_url: $preview_url, flip_from_revision: $flip_from_revision}')
+              preview_url: $preview_url,
+              flip_from_revision: $flip_from_revision,
+              previewed_version_id: $previewed_version_id}
+             | with_entries(select(.value != ""))')
           curl -fsS -X POST "$CALLBACK/webhooks/release-wave/stage-report" \
             -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
             -H "Content-Type: application/json" \
@@ -356,17 +385,33 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash -c "$INSTALL_CMD"
 
-      # 一番直近の versions upload を 100% に振る。Phase 5 で stage 時に
-      # 取得した version_id を client_payload 経由で受け取って明示指定する
-      # ように改善する。
-      - name: wrangler versions deploy 100%
+      # stage で preview した version (previewed_version_id) を 100% traffic へ
+      # flip する。これで「preview で検証したまさにその version」が production
+      # になる (= flip 時に別途 deploy し直さない)。Refs ippoan/ci-dashboard#174。
+      #
+      # client_payload.previewed_version_id は untrusted input なので env 経由で
+      # 受けて UUID 形式を検証してから wrangler に渡す (= command injection 防止)。
+      - name: wrangler versions deploy (flip to previewed version)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ needs.dispatch.outputs.cf_account_id }}
+          PREVIEWED_VERSION_ID: ${{ github.event.client_payload.previewed_version_id }}
         run: |
           set -euo pipefail
-          # `wrangler deploy` (= versions deploy 100% に等価) で latest version を flip
-          npx wrangler deploy
+          VID="${PREVIEWED_VERSION_ID:-}"
+          if [[ -n "$VID" ]]; then
+            if ! [[ "$VID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+              echo "::error::previewed_version_id has invalid format (expected UUID)"
+              exit 1
+            fi
+            echo "flipping 100% traffic to previewed version $VID"
+            npx wrangler versions deploy "${VID}@100%" --yes
+          else
+            # 後方互換: previewed_version_id 不在 (旧 dispatcher / 単独 release) は
+            # 従来どおり現コードを deploy して flip する。
+            echo "::warning::no previewed_version_id in payload; falling back to 'wrangler deploy'"
+            npx wrangler deploy
+          fi
 
       - name: Callback flip-report
         env:
@@ -443,17 +488,27 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash -c "$INSTALL_CMD"
 
-      - name: wrangler rollback
+      # flip_from_revision (= stage 時に控えた flip 前 active version) へ
+      # traffic を戻す。stage 側で取得できていれば明示的にその version を
+      # 100% へ deploy する。取得できていなければ wrangler 既定の rollback。
+      # client_payload.flip_from_revision は untrusted なので env 経由 + 形式検証。
+      - name: wrangler rollback (deploy previous version 100%)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ needs.dispatch.outputs.cf_account_id }}
+          FLIP_FROM_REVISION: ${{ github.event.client_payload.flip_from_revision }}
         run: |
           set -euo pipefail
-          # `wrangler rollback` (Wrangler 4+) は直近に deploy した version を
-          # 前 version に戻す。明示的な version 指定が必要なら
-          # `wrangler rollback <id>` を Phase 5 で client_payload 由来の
-          # rollback_target_revision で渡す形に変える。
-          npx wrangler rollback
+          VID="${FLIP_FROM_REVISION:-}"
+          if [[ -n "$VID" ]] && [[ "$VID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "rolling back: deploy previous version $VID @100%"
+            npx wrangler versions deploy "${VID}@100%" --yes
+          else
+            # flip_from_revision が無い / 形式不一致なら wrangler 既定の rollback
+            # (= 直近に deploy した version を前 version に戻す)。
+            echo "::warning::no valid flip_from_revision; falling back to 'wrangler rollback'"
+            npx wrangler rollback
+          fi
 
       # rollback 完了 callback は現状 state machine に無い (= release_wave_rollback
       # MCP tool が caller-driven で wave state を rolled-back に進める設計)。
