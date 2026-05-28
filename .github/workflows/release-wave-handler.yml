@@ -78,6 +78,7 @@ jobs:
       services_json:        ${{ steps.lookup.outputs.services_json }}
       monorepo_units_json:  ${{ steps.lookup.outputs.monorepo_units_json }}
       install_command:      ${{ steps.lookup.outputs.install_command }}
+      npm_scope:            ${{ steps.lookup.outputs.npm_scope }}
     steps:
       # client_payload は **attacker controllable** (= repository_dispatch
       # 経由で送られる任意 JSON)。env 経由で受けて parse + strict 形式検証する。
@@ -191,6 +192,11 @@ jobs:
           # config は ci-workflows committer が管理する trusted input。
           # `-r` (raw) で quote を剥がす → bash -c に直接渡せる文字列にする。
           echo "install_command=$(yq -r ".targets[\"$REPO\"].install_command // \"npm ci\"" "$CFG")" >> "$GITHUB_OUTPUT"
+          # npm_scope (e.g. @ippoan) を渡すと setup-node が
+          # registry-url=https://npm.pkg.github.com + scope を .npmrc に書く。
+          # NODE_AUTH_TOKEN=secrets.GITHUB_TOKEN で GitHub Packages 認証。
+          # default 空文字列 = scope 設定無し (= public registry のみ)。
+          echo "npm_scope=$(yq -r ".targets[\"$REPO\"].npm_scope // \"\"" "$CFG")" >> "$GITHUB_OUTPUT"
 
   # =========================================================================
   # stage (cloudflare-workers): wrangler versions upload + preview URL
@@ -208,10 +214,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          # npm_scope (e.g. @ippoan) があれば GitHub Packages を registry に
+          # 設定。NODE_AUTH_TOKEN を expose する .npmrc が actions/setup-node
+          # 側で生成される。
+          registry-url: ${{ needs.dispatch.outputs.npm_scope != '' && 'https://npm.pkg.github.com' || '' }}
+          scope: ${{ needs.dispatch.outputs.npm_scope }}
 
       - name: Install deps
         env:
           INSTALL_CMD: ${{ needs.dispatch.outputs.install_command }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash -c "$INSTALL_CMD"
 
       # tag を打って push。これが「stage された code の immutable ref」になる
@@ -328,10 +340,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          # npm_scope (e.g. @ippoan) があれば GitHub Packages を registry に
+          # 設定。NODE_AUTH_TOKEN を expose する .npmrc が actions/setup-node
+          # 側で生成される。
+          registry-url: ${{ needs.dispatch.outputs.npm_scope != '' && 'https://npm.pkg.github.com' || '' }}
+          scope: ${{ needs.dispatch.outputs.npm_scope }}
 
       - name: Install deps
         env:
           INSTALL_CMD: ${{ needs.dispatch.outputs.install_command }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash -c "$INSTALL_CMD"
 
       # 一番直近の versions upload を 100% に振る。Phase 5 で stage 時に
@@ -396,10 +414,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          # npm_scope (e.g. @ippoan) があれば GitHub Packages を registry に
+          # 設定。NODE_AUTH_TOKEN を expose する .npmrc が actions/setup-node
+          # 側で生成される。
+          registry-url: ${{ needs.dispatch.outputs.npm_scope != '' && 'https://npm.pkg.github.com' || '' }}
+          scope: ${{ needs.dispatch.outputs.npm_scope }}
 
       - name: Install deps
         env:
           INSTALL_CMD: ${{ needs.dispatch.outputs.install_command }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash -c "$INSTALL_CMD"
 
       - name: wrangler rollback
