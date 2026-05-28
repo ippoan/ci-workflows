@@ -56,6 +56,10 @@ on:
 permissions:
   contents: write       # tag push
   id-token: write       # GCP WIF (cloudrun path 用、宣言だけしておく)
+  packages: read        # @ippoan/* GitHub Packages dep install (npm_scope 使用時)
+                        # reusable workflow が permissions: を declare する場合、
+                        # ここに無い権限は caller が宣言していても effective token
+                        # から除外される (= deny by default)。Refs ippoan/ci-dashboard#152
 
 jobs:
   # =========================================================================
