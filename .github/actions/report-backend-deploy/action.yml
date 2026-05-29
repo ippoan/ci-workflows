@@ -19,6 +19,13 @@ inputs:
       production traffic を受けている image identifier (不透明文字列、完全一致比較)。
       Cloud Run=revision name / target tag、CF Workers=version id、GHCR=digest 等。
     required: true
+  current_tag:
+    description: >-
+      current_image に対応する git release tag (例 v1.4.2)。/release-wave の
+      Compatibility グラフ表示 + backend rollback 候補に使う。省略可 (= null)。
+      Refs ippoan/ci-dashboard#197。
+    required: false
+    default: ''
   deployed_by:
     description: 'deploy の主体。例: release-wave-gcp / <workflow_name>'
     required: false
@@ -40,6 +47,7 @@ runs:
         CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
         REPO: ${{ inputs.repo }}
         CURRENT_IMAGE: ${{ inputs.current_image }}
+        CURRENT_TAG: ${{ inputs.current_tag }}
         DEPLOYED_BY: ${{ inputs.deployed_by }}
         WAVE_ID: ${{ inputs.wave_id }}
         WEBHOOK_SECRET: ${{ inputs.webhook_secret }}
@@ -55,24 +63,21 @@ runs:
           exit 1
         fi
 
-        # wave_id は空なら body から省く (= server 側で null 格納)。
+        # 必須 field の base payload。wave_id / current_tag は空なら省く
+        # (= server 側で null 格納)。
+        payload=$(jq -nc \
+          --arg repo "$REPO" \
+          --arg current_image "$CURRENT_IMAGE" \
+          --arg deployed_by "$DEPLOYED_BY" \
+          '{repo: $repo, current_image: $current_image, deployed_by: $deployed_by}')
         if [[ -n "$WAVE_ID" ]]; then
-          payload=$(jq -nc \
-            --arg repo "$REPO" \
-            --arg current_image "$CURRENT_IMAGE" \
-            --arg deployed_by "$DEPLOYED_BY" \
-            --arg wave_id "$WAVE_ID" \
-            '{repo: $repo, current_image: $current_image,
-              deployed_by: $deployed_by, wave_id: $wave_id}')
-        else
-          payload=$(jq -nc \
-            --arg repo "$REPO" \
-            --arg current_image "$CURRENT_IMAGE" \
-            --arg deployed_by "$DEPLOYED_BY" \
-            '{repo: $repo, current_image: $current_image, deployed_by: $deployed_by}')
+          payload=$(printf '%s' "$payload" | jq -c --arg wave_id "$WAVE_ID" '. + {wave_id: $wave_id}')
+        fi
+        if [[ -n "$CURRENT_TAG" ]]; then
+          payload=$(printf '%s' "$payload" | jq -c --arg current_tag "$CURRENT_TAG" '. + {current_tag: $current_tag}')
         fi
 
-        echo "Reporting backend deploy: $REPO @ $CURRENT_IMAGE (by $DEPLOYED_BY${WAVE_ID:+, wave $WAVE_ID})"
+        echo "Reporting backend deploy: $REPO @ $CURRENT_IMAGE${CURRENT_TAG:+ ($CURRENT_TAG)} (by $DEPLOYED_BY${WAVE_ID:+, wave $WAVE_ID})"
         curl -fsS -X POST "$CI_DASHBOARD_BASE/webhooks/release-wave/backend-deploy-report" \
           -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
           -H "Content-Type: application/json" \

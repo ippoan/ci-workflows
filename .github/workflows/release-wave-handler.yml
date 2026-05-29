@@ -3,10 +3,14 @@ name: Release Wave Handler
 # ippoan/ci-dashboard#137 Phase 4b で導入する reusable workflow。
 #
 # 各 release-wave 参加 repo の `.github/workflows/release-wave.yml` から
-# `uses:` で呼ばれる。`repository_dispatch` で ci-dashboard が送る 3 event
-# (release-wave-stage / -flip / -rollback) を受けて platform 別の deploy
-# 操作を行い、結果を `https://ci-dashboard.ippoan.org/webhooks/release-wave/*`
-# に POST する。
+# `uses:` で呼ばれる。`repository_dispatch` で ci-dashboard が送る event を受けて
+# platform 別の deploy 操作を行い、結果を
+# `https://ci-dashboard.ippoan.org/webhooks/release-wave/*` に POST する。
+#
+# 受ける event:
+#   - release-wave-stage / -flip / -rollback         (wave lifecycle)
+#   - release-wave-traffic-rollback                  (frontend 単独 rollback, #196)
+#   - release-wave-backend-rollback                  (backend 単独 rollback, #197)
 #
 # Caller (`.github/workflows/release-wave.yml`) 例:
 #
@@ -16,6 +20,8 @@ name: Release Wave Handler
 #         - release-wave-stage
 #         - release-wave-flip
 #         - release-wave-rollback
+#         - release-wave-traffic-rollback   # frontend (cloudflare-workers) のみ
+#         - release-wave-backend-rollback   # backend (cloudrun) のみ
 #
 #   permissions:
 #     contents: write
@@ -102,6 +108,10 @@ jobs:
           # set する値なので任意ではないが、念のため allowlist check。
           case "$EVENT_ACTION" in
             release-wave-stage|release-wave-flip|release-wave-rollback) ;;
+            # 単独 rollback (wave 非依存)。/release-wave の Traffic / Compatibility
+            # UI から任意の過去 version / revision に即 100% で戻す。Refs
+            # ippoan/ci-dashboard#196 / #197。target_tag は持たない場合がある。
+            release-wave-traffic-rollback|release-wave-backend-rollback) ;;
             *)
               echo "::error::unknown event action: $EVENT_ACTION"
               exit 1 ;;
@@ -113,11 +123,20 @@ jobs:
           target_tag=$(printf '%s' "$PAYLOAD" | jq -r '.target_tag // ""')
           head_sha=$(printf '%s' "$PAYLOAD"   | jq -r '.head_sha   // ""')
 
-          # 必須 field 不在は即 fail
-          if [[ -z "$wave_id" || -z "$target_tag" ]]; then
-            echo "::error::client_payload missing required field (wave_id / target_tag)"
-            exit 1
-          fi
+          # target_tag は単独 rollback 系では optional (戻し先 version/revision が
+          # 主体で tag は表示用)。それ以外 (stage/flip/rollback) では必須。
+          case "$EVENT_ACTION" in
+            release-wave-traffic-rollback|release-wave-backend-rollback)
+              if [[ -z "$wave_id" ]]; then
+                echo "::error::client_payload missing required field (wave_id)"
+                exit 1
+              fi ;;
+            *)
+              if [[ -z "$wave_id" || -z "$target_tag" ]]; then
+                echo "::error::client_payload missing required field (wave_id / target_tag)"
+                exit 1
+              fi ;;
+          esac
 
           # ---- 形式検証 (ref injection 防止) ----
           # wave_id: 英数 + - + _ + . のみ、最大 128 文字
@@ -126,8 +145,8 @@ jobs:
             exit 1
           fi
           # target_tag: semantic-version like (v?<digit/letter/.>+ で 64 文字以内)
-          # `..` `/` `;` `&` `\$` `\`` `(` などを排除
-          if ! [[ "$target_tag" =~ ^v?[a-zA-Z0-9._-]{1,64}$ ]]; then
+          # `..` `/` `;` `&` `\$` `\`` `(` などを排除。空 (optional) はここを skip。
+          if [[ -n "$target_tag" ]] && ! [[ "$target_tag" =~ ^v?[a-zA-Z0-9._-]{1,64}$ ]]; then
             echo "::error::target_tag has invalid format: must match ^v?[a-zA-Z0-9._-]{1,64}\$"
             exit 1
           fi
@@ -516,6 +535,7 @@ jobs:
           ci_dashboard_base_url: ${{ inputs.callback_base_url }}
           repo: ${{ github.repository }}
           current_image: ${{ needs.dispatch.outputs.target_tag }}
+          current_tag: ${{ needs.dispatch.outputs.target_tag }}
           deployed_by: release-wave
           wave_id: ${{ needs.dispatch.outputs.wave_id }}
           webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
@@ -591,6 +611,53 @@ jobs:
       # rollback 完了 callback は現状 state machine に無い (= release_wave_rollback
       # MCP tool が caller-driven で wave state を rolled-back に進める設計)。
       # 進捗確認のため別途 ci-dashboard を更新する想定。
+
+  # =========================================================================
+  # traffic-rollback (cloudflare-workers): 任意の過去 version へ即 100% で戻す
+  #
+  # /release-wave の Traffic テーブル「Rollback to <tag>」が dispatch する
+  # release-wave-traffic-rollback event を受ける。wave 非依存 (= callback 無し)。
+  # previewed_version_id (= 戻し先 version id) を 100% traffic に flip する。
+  # Refs ippoan/ci-dashboard#196。
+  # =========================================================================
+  traffic-rollback-cloudflare-workers:
+    name: Traffic rollback (cloudflare-workers)
+    needs: dispatch
+    if: needs.dispatch.outputs.event_type == 'release-wave-traffic-rollback' && needs.dispatch.outputs.platform == 'cloudflare-workers'
+    runs-on: ubuntu-latest
+    steps:
+      # head_sha は空 (rollback は version id 直接 deploy)。checkout は
+      # wrangler.toml / deps を置くため main を取る。
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: ${{ needs.dispatch.outputs.npm_scope != '' && 'https://npm.pkg.github.com' || '' }}
+          scope: ${{ needs.dispatch.outputs.npm_scope }}
+
+      - name: Install deps
+        env:
+          INSTALL_CMD: ${{ needs.dispatch.outputs.install_command }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash -c "$INSTALL_CMD"
+
+      # client_payload.previewed_version_id は untrusted。env 経由 + UUID 形式検証
+      # してから wrangler に渡す (command injection 防止)。
+      - name: wrangler versions deploy (rollback to selected version)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ needs.dispatch.outputs.cf_account_id }}
+          PREVIEWED_VERSION_ID: ${{ github.event.client_payload.previewed_version_id }}
+        run: |
+          set -euo pipefail
+          VID="${PREVIEWED_VERSION_ID:-}"
+          if ! [[ "$VID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::previewed_version_id has invalid format (expected UUID)"
+            exit 1
+          fi
+          echo "traffic rollback: deploy version $VID @100%"
+          npx wrangler versions deploy "${VID}@100%" --yes
 
   # =========================================================================
   # Cloud Run path (Phase 4c)
@@ -820,6 +887,7 @@ jobs:
           ci_dashboard_base_url: ${{ inputs.callback_base_url }}
           repo: ${{ github.repository }}
           current_image: ${{ needs.dispatch.outputs.target_tag }}
+          current_tag: ${{ needs.dispatch.outputs.target_tag }}
           deployed_by: release-wave-gcp
           wave_id: ${{ needs.dispatch.outputs.wave_id }}
           webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
@@ -883,3 +951,64 @@ jobs:
       # rollback callback は state machine 上は無いため省略 (= release_wave_rollback
       # MCP tool が caller-driven で state を rolled-back に進めた後、本 job が
       # 副作用として実 traffic 戻しを行う構造)。
+
+  # =========================================================================
+  # backend-rollback (cloudrun): 任意の過去 revision へ即 100% で戻す
+  #
+  # /release-wave の「Backend rollback (Cloud Run revision)」が dispatch する
+  # release-wave-backend-rollback event を受ける。wave 非依存 (= callback 無し)。
+  # 戻し先 revision は client_payload.rollback_target[<service>]、無ければ
+  # client_payload.rollback_revision (単一値 fallback)。Refs ippoan/ci-dashboard#197。
+  # =========================================================================
+  backend-rollback-cloudrun:
+    name: Backend rollback (cloudrun) [${{ matrix.service }}]
+    needs: dispatch
+    if: needs.dispatch.outputs.event_type == 'release-wave-backend-rollback' && needs.dispatch.outputs.platform == 'cloudrun'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.dispatch.outputs.services_json) }}
+    steps:
+      # client_payload.* は untrusted。env 経由 + jq 抽出 + 形式検証してから渡す。
+      - name: Resolve rollback target revision
+        id: target
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+          # service 別の戻し先を優先、無ければ単一値 rollback_revision に fallback。
+          to_revision=$(printf '%s' "$PAYLOAD" \
+            | jq -r --arg s "$SERVICE" '.rollback_target[$s] // .rollback_revision // ""')
+          if [[ -z "$to_revision" ]]; then
+            echo "::error::no rollback target for $SERVICE (rollback_target[$SERVICE] / rollback_revision both empty)"
+            exit 1
+          fi
+          if ! [[ "$to_revision" =~ ^[a-z0-9-]{1,256}$ ]]; then
+            echo "::error::to_revision for $SERVICE has invalid format"
+            exit 1
+          fi
+          echo "to_revision=$to_revision" >> "$GITHUB_OUTPUT"
+
+      - name: Call release-wave-gcp /cloudrun/rollback
+        env:
+          GCP_PROJECT: ${{ needs.dispatch.outputs.gcp_project }}
+          GCP_REGION: ${{ needs.dispatch.outputs.gcp_region }}
+          SERVICE: ${{ matrix.service }}
+          TO_REVISION: ${{ steps.target.outputs.to_revision }}
+          GCP_BASE: ${{ inputs.release_wave_gcp_base_url }}
+          GCP_API_KEY: ${{ secrets.RELEASE_WAVE_GCP_API_KEY }}
+        run: |
+          set -euo pipefail
+          body=$(jq -nc \
+            --arg project "$GCP_PROJECT" \
+            --arg region "$GCP_REGION" \
+            --arg service "$SERVICE" \
+            --arg to_revision "$TO_REVISION" \
+            '{project: $project, region: $region, service: $service,
+              to_revision: $to_revision}')
+          curl -fsS -X POST "$GCP_BASE/cloudrun/rollback" \
+            -H "X-Release-Wave-API-Key: $GCP_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$body"
