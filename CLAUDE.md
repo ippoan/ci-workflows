@@ -312,6 +312,8 @@ on:
       - release-wave-stage
       - release-wave-flip
       - release-wave-rollback
+      - release-wave-traffic-rollback   # frontend 単独 rollback (cloudflare-workers)
+      - release-wave-backend-rollback    # backend 単独 rollback (cloudrun)
 
 permissions:
   contents: write     # tag push
@@ -344,6 +346,14 @@ cloudrun platform の repo (e.g. `ippoan/rust-alc-api`) で:
 - **Rollback**: `services[]` 並列で `/cloudrun/rollback`。戻し先 revision
   は `client_payload.rollback_target[<service>]` から取得 (ci-dashboard
   側 dispatcher 実装時に各 service 別の flip_from_revision を載せる)。
+- **Backend rollback** (`release-wave-backend-rollback`, Refs ippoan/ci-dashboard#197):
+  /release-wave の「Backend rollback」ボタンから任意の過去 revision へ即 100%。
+  戻し先は `client_payload.rollback_target[<service>]`、無ければ単一値
+  `client_payload.rollback_revision` に fallback。wave 非依存 (callback 無し)。
+
+frontend (cloudflare-workers) には `release-wave-traffic-rollback`
+(Refs ippoan/ci-dashboard#196) が対応し、`previewed_version_id` を
+`wrangler versions deploy <id>@100%` で即 100% に戻す。
 
 reusable input `release_wave_gcp_base_url` で release-wave-gcp の URL を
 上書き可能 (default は staging)。
