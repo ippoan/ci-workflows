@@ -1282,17 +1282,32 @@ jobs:
 
           # `wrangler deployments list` の JSON から version_id → percentage を組む。
           # gradual deployment が無い (単一 version 100%) worker でも 1 件は返る。
-          DEPLOYMENTS=$(npx --yes wrangler deployments list --json 2>&1) || {
+          #
+          # 注意: wrangler / npm は stdout に warning ("▲ WARNING ..." や npm warn)
+          # を混ぜることがあり、2>&1 で stderr を取り込むと JSON 先頭に non-JSON 行が
+          # 載って jq parse error になる。よって stderr は分離し (失敗時のみ表示)、
+          # stdout からも最初の '[' 以降だけを取り出して warning 行を捨てる。
+          err_file="$(mktemp)"
+          RAW=$(npx --yes wrangler deployments list --json 2>"$err_file") || {
             echo "::error::wrangler deployments list failed:"
-            printf '%s\n' "$DEPLOYMENTS"
+            printf '%s\n' "$RAW"
+            cat "$err_file" >&2
             exit 1
           }
+          # stdout 先頭の warning 行を除去 (最初の '[' から末尾まで)。
+          DEPLOYMENTS=$(printf '%s' "$RAW" | sed -n '/^[[:space:]]*\[/,$p')
+          if [ -z "$DEPLOYMENTS" ]; then
+            echo "::error::wrangler deployments list output had no JSON array:"
+            printf '%s\n' "$RAW"
+            exit 1
+          fi
 
-          # 最新 deployment の versions[] を { version_id, percentage } 配列に整形。
-          # wrangler の出力 shape: [{ id, versions: [{ version_id, percentage }], ... }, ...]
-          # (新しい順)。先頭 = 現行 deployment。
+          # 現行 deployment の versions[] を { version_id, percentage } 配列に整形。
+          # wrangler の出力 shape: [{ id, strategy, versions: [{ version_id,
+          # percentage }], created_on, ... }, ...] で **created_on 昇順 (= 末尾が
+          # 最新)**。現行 deployment = .[-1]。
           versions=$(printf '%s' "$DEPLOYMENTS" | jq -c '
-            (if type == "array" then .[0] else . end)
+            (if type == "array" then (.[-1] // {}) else . end)
             | (.versions // [])
             | map({ version_id: (.version_id // .id // ""), percentage: (.percentage // 0) })
             | map(select(.version_id != ""))
