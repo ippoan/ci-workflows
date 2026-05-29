@@ -144,7 +144,7 @@ jobs:
 | `working_directory` | `.` | npm コマンドの作業ディレクトリ |
 | `install_command` | `npm ci` | 依存インストールコマンド |
 | `has_tests` | `true` | Vitest 実行するか |
-| `has_integration` | `false` | 統合テスト実行するか |
+| `has_integration` | `false` | 統合テスト実行するか。**`true` にしたら `compat_backend_repo` が必須** — 未設定だと `API Integration` job が loud fail する (Release Wave compatibility edge の配線忘れ防止)。backend を相手にしない統合テストは `compat_backend_repo: 'none'` で opt-out |
 | `has_deploy` | `true` | デプロイジョブ実行するか |
 | `npm_scope` | `''` | GitHub Packages スコープ |
 | `post_install_script` | `''` | install 後のスクリプト |
