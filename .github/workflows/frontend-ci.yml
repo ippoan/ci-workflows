@@ -1170,6 +1170,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Deploy to production
+        id: deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           RELEASE_SCRIPT: ${{ inputs.deploy_release_script }}
@@ -1224,6 +1225,13 @@ jobs:
             exit "$rc"
           fi
 
+          # この deploy で生成した version id を後続 step (traffic-report) に渡す。
+          # traffic-report はこれを「今 upload した version」として tag (= 今の
+          # release tag) を紐付ける。100% deploy / no-traffic upload どちらでも
+          # wrangler は "Version ID:" / "Worker Version ID:" を出す。
+          VID=$(printf '%s' "$OUT" | grep -oiE 'Version ID:[[:space:]]+[0-9a-f-]+' | tail -1 | awk '{print $NF}')
+          echo "uploaded_version_id=${VID:-}" >> "$GITHUB_OUTPUT"
+
           # ---- pending-release report (Refs ippoan/ci-dashboard#181) ----
           # no-traffic upload した version を ci-dashboard に登録し、
           # /release-wave の「Pending releases」から Flip できるようにする。
@@ -1231,7 +1239,6 @@ jobs:
           if [ "$NO_TRAFFIC_UPLOAD" != "true" ]; then
             exit 0
           fi
-          VID=$(printf '%s' "$OUT" | grep -oiE 'Version ID:[[:space:]]+[0-9a-f-]+' | tail -1 | awk '{print $NF}')
           PREVIEW=$(printf '%s' "$OUT" | grep -iE 'preview url' | grep -oiE 'https://[a-z0-9._-]+\.workers\.dev[^[:space:]]*' | head -1 || true)
           if [ -z "$VID" ]; then
             echo "::warning::could not parse Version ID from wrangler output; skip pending-release report"
@@ -1281,6 +1288,11 @@ jobs:
           CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
           RELEASE_WAVE_WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
           REPO: ${{ github.repository }}
+          # 今 upload した version_id と、その release tag (github.ref_name)。
+          # この version にだけ tag を紐付けて報告する。ci-dashboard は
+          # version_id 単位に tag を merge 蓄積するので、過去 version の tag は残る。
+          UPLOADED_VID: ${{ steps.deploy.outputs.uploaded_version_id }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -1322,15 +1334,21 @@ jobs:
             echo "::error::wrangler versions list output had no JSON array:"; printf '%s\n' "$V_RAW"; exit 1
           fi
 
-          # 3) join: 各 version に percentage (pct_map に無ければ 0) と created_on を付ける。
+          # 3) join: 各 version に percentage (pct_map に無ければ 0) と created_on を付け、
+          #    今 upload した version (UPLOADED_VID) にだけ release tag を紐付ける。
+          #    他 version の tag は null (ci-dashboard 側で既存 record から merge 保持)。
           versions=$(jq -nc \
             --argjson pct "$pct_map" \
-            --argjson vers "$VERSIONS" '
+            --argjson vers "$VERSIONS" \
+            --arg uploaded "${UPLOADED_VID:-}" \
+            --arg tag "${TAG:-}" '
             $vers
             | map({
                 version_id: (.id // .version_id // ""),
                 percentage: ($pct[(.id // .version_id // "")] // 0),
-                created_on: (.metadata.created_on // .created_on // null)
+                created_on: (.metadata.created_on // .created_on // null),
+                tag: (if ($uploaded != "" and (.id // .version_id // "") == $uploaded and $tag != "")
+                      then $tag else null end)
               })
             | map(select(.version_id != ""))
           ') || { echo "::error::failed to join versions/deployments"; exit 1; }
