@@ -1336,21 +1336,33 @@ jobs:
 
           # 3) join: 各 version に percentage (pct_map に無ければ 0) と created_on を付け、
           #    今 upload した version (UPLOADED_VID) にだけ release tag を紐付ける。
-          #    他 version の tag は null (ci-dashboard 側で既存 record から merge 保持)。
+          #    - version 数を絞る: traffic を受けている version (percentage>0) は全件、
+          #      0% は created_on 降順で直近 20 件のみ (古い no-traffic 履歴は ci-dashboard
+          #      表示でも捨てられるので送らない。payload 肥大 = 400 を防ぐ)。
+          #    - created_on / tag が無い version はキーごと省略する (ci-dashboard の
+          #      zod schema は optional を `undefined` として扱うため。null を送ると
+          #      `.optional()` に弾かれて 400 になる)。
           versions=$(jq -nc \
             --argjson pct "$pct_map" \
             --argjson vers "$VERSIONS" \
             --arg uploaded "${UPLOADED_VID:-}" \
             --arg tag "${TAG:-}" '
-            $vers
-            | map({
-                version_id: (.id // .version_id // ""),
-                percentage: ($pct[(.id // .version_id // "")] // 0),
-                created_on: (.metadata.created_on // .created_on // null),
-                tag: (if ($uploaded != "" and (.id // .version_id // "") == $uploaded and $tag != "")
-                      then $tag else null end)
-              })
-            | map(select(.version_id != ""))
+            ($vers
+              | map({
+                  version_id: (.id // .version_id // ""),
+                  percentage: ($pct[(.id // .version_id // "")] // 0),
+                  created_on: (.metadata.created_on // .created_on // null),
+                  tag: (if ($uploaded != "" and (.id // .version_id // "") == $uploaded and $tag != "")
+                        then $tag else null end)
+                })
+              | map(select(.version_id != ""))
+            ) as $all
+            | ($all | map(select(.percentage > 0))) as $active
+            | ($all | map(select(.percentage <= 0))
+                    | sort_by(.created_on // "") | reverse | .[0:20]) as $zero
+            | ($active + $zero)
+            # null の created_on / tag はキーごと落とす (optional を undefined 扱いに)。
+            | map(with_entries(select(.value != null)))
           ') || { echo "::error::failed to join versions/deployments"; exit 1; }
 
           n=$(printf '%s' "$versions" | jq 'length')
