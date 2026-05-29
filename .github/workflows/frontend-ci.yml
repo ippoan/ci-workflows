@@ -166,7 +166,10 @@ on:
         description: >-
           integration test の相手 backend repo (owner/name)。例: ippoan/rust-alc-api。
           設定すると integration test green 後に compatibility report job が走る。
-          空 = report しない (default)。
+          ⚠ has_integration: true の caller では **必須** — 未設定だと
+          integration-test job が loud fail する (Release Wave グラフからの
+          silent な edge 漏れを防ぐため)。backend を相手にしない / 意図的に
+          compat report しない integration test は 'none' を明示して opt-out する。
         required: false
         type: string
         default: ''
@@ -726,6 +729,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # has_integration: true なのに compat_backend_repo が未設定 = backend を
+      # 相手に test しているのに Release Wave compatibility edge を記録しない
+      # 設定忘れ。silent にグラフから漏れるのを防ぐため loud fail で炙り出す。
+      # 意図的に compat report しない integration test は compat_backend_repo:
+      # 'none' を明示して opt-out する。
+      - name: Require compatibility wiring
+        if: inputs.compat_backend_repo == ''
+        run: |
+          echo "::error::has_integration: true ですが compat_backend_repo が未設定です。integration test は backend を相手に走るので、Release Wave compatibility edge を記録するために compat_backend_repo (例: ippoan/rust-alc-api) と compat_backend_image_env (例: API_IMAGE) を設定してください。backend を相手にしない / 意図的に compat report しない integration test は compat_backend_repo: 'none' を明示して opt-out できます。"
+          exit 1
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
@@ -777,7 +791,7 @@ jobs:
       # report-compatibility が記録 SHA として使う。
       - name: Resolve backend image (compatibility)
         id: resolve-backend
-        if: inputs.compat_backend_repo != ''
+        if: inputs.compat_backend_repo != '' && inputs.compat_backend_repo != 'none'
         working-directory: ${{ github.workspace }}
         env:
           CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
@@ -846,6 +860,7 @@ jobs:
     if: >-
       always() &&
       inputs.compat_backend_repo != '' &&
+      inputs.compat_backend_repo != 'none' &&
       needs.integration-test.result == 'success'
     runs-on: ubuntu-latest
     steps:
