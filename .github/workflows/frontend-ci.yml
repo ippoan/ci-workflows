@@ -1255,14 +1255,25 @@ jobs:
             -d "$payload" || echo "::warning::pending-release report failed (best-effort)"
 
       # ---- traffic-report (Refs ippoan/ci-dashboard#137) ----
-      # deploy 後の worker version traffic split (version_id → percentage) を
-      # ci-dashboard に報告し、/release-wave の Compatibility グラフ下に
-      # 「100% / 0% (no-traffic) がどの version か」を出す。
+      # deploy 後の worker version traffic split を ci-dashboard に報告し、
+      # /release-wave の Compatibility グラフ下に「どの version が 100% (active) /
+      # 0% (no-traffic / promote 待ち) で、それぞれいつ deploy/upload されたか」を
+      # 出す。
+      #
+      # 2 つの wrangler 出力をマージする:
+      #   - `deployments list`: active deployment の versions[] (version_id →
+      #     percentage)。通常 100% の 1 件。0% version は **含まれない**。
+      #   - `versions list`: 直近 version 群 (id + metadata.created_on)。
+      #     percentage は持たない。
+      # → versions list の全 version に、deployments list の percentage を join
+      #   (無ければ 0%)、created_on を付けて報告する。これで 0% (promote 待ち) の
+      #   version も日時付きで出せる。
       #
       # 方針: best-effort ではなく **失敗したら CI を block** する (user 指定)。
       # secret 未設定 / wrangler 取得失敗 / parse 失敗 / POST 失敗のいずれも fail。
-      # worker (= wrangler 管理) のみ対象。nuxt も wrangler deploy する構成なので
-      # project_type に依らず wrangler deployments を引く。
+      # 注意: wrangler / npm は stdout に warning ("▲ WARNING ..." / npm warn) を
+      # 混ぜるため、stderr は分離し、stdout も最初の '[' 以降だけ取り出して JSON
+      # 先頭の non-JSON 行を捨てる (さもないと jq parse error)。
       - name: Report version traffic split
         if: inputs.has_deploy && startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
         env:
@@ -1280,46 +1291,53 @@ jobs:
             exit 1
           fi
 
-          # `wrangler deployments list` の JSON から version_id → percentage を組む。
-          # gradual deployment が無い (単一 version 100%) worker でも 1 件は返る。
-          #
-          # 注意: wrangler / npm は stdout に warning ("▲ WARNING ..." や npm warn)
-          # を混ぜることがあり、2>&1 で stderr を取り込むと JSON 先頭に non-JSON 行が
-          # 載って jq parse error になる。よって stderr は分離し (失敗時のみ表示)、
-          # stdout からも最初の '[' 以降だけを取り出して warning 行を捨てる。
-          err_file="$(mktemp)"
-          RAW=$(npx --yes wrangler deployments list --json 2>"$err_file") || {
-            echo "::error::wrangler deployments list failed:"
-            printf '%s\n' "$RAW"
-            cat "$err_file" >&2
-            exit 1
-          }
-          # stdout 先頭の warning 行を除去 (最初の '[' から末尾まで)。
-          DEPLOYMENTS=$(printf '%s' "$RAW" | sed -n '/^[[:space:]]*\[/,$p')
-          if [ -z "$DEPLOYMENTS" ]; then
-            echo "::error::wrangler deployments list output had no JSON array:"
-            printf '%s\n' "$RAW"
-            exit 1
-          fi
+          # stdout から最初の JSON 配列だけを取り出す helper (warning 行除去)。
+          strip_json() { sed -n '/^[[:space:]]*\[/,$p'; }
 
-          # 現行 deployment の versions[] を { version_id, percentage } 配列に整形。
-          # wrangler の出力 shape: [{ id, strategy, versions: [{ version_id,
-          # percentage }], created_on, ... }, ...] で **created_on 昇順 (= 末尾が
-          # 最新)**。現行 deployment = .[-1]。
-          versions=$(printf '%s' "$DEPLOYMENTS" | jq -c '
+          # 1) deployments list → active deployment の version_id → percentage。
+          d_err="$(mktemp)"
+          D_RAW=$(npx --yes wrangler deployments list --json 2>"$d_err") || {
+            echo "::error::wrangler deployments list failed:"; printf '%s\n' "$D_RAW"; cat "$d_err" >&2; exit 1
+          }
+          DEPLOYMENTS=$(printf '%s' "$D_RAW" | strip_json)
+          if [ -z "$DEPLOYMENTS" ]; then
+            echo "::error::wrangler deployments list output had no JSON array:"; printf '%s\n' "$D_RAW"; exit 1
+          fi
+          # 現行 deployment = created_on 昇順の末尾 (.[-1])。version_id→percentage の object に。
+          pct_map=$(printf '%s' "$DEPLOYMENTS" | jq -c '
             (if type == "array" then (.[-1] // {}) else . end)
             | (.versions // [])
-            | map({ version_id: (.version_id // .id // ""), percentage: (.percentage // 0) })
-            | map(select(.version_id != ""))
-          ') || {
-            echo "::error::failed to parse wrangler deployments output:"
-            printf '%s\n' "$DEPLOYMENTS"
-            exit 1
+            | map({ key: (.version_id // .id // ""), value: (.percentage // 0) })
+            | map(select(.key != ""))
+            | from_entries
+          ') || { echo "::error::failed to parse deployments list:"; printf '%s\n' "$DEPLOYMENTS"; exit 1; }
+
+          # 2) versions list → 直近 version 群 (id + created_on)。
+          v_err="$(mktemp)"
+          V_RAW=$(npx --yes wrangler versions list --json 2>"$v_err") || {
+            echo "::error::wrangler versions list failed:"; printf '%s\n' "$V_RAW"; cat "$v_err" >&2; exit 1
           }
+          VERSIONS=$(printf '%s' "$V_RAW" | strip_json)
+          if [ -z "$VERSIONS" ]; then
+            echo "::error::wrangler versions list output had no JSON array:"; printf '%s\n' "$V_RAW"; exit 1
+          fi
+
+          # 3) join: 各 version に percentage (pct_map に無ければ 0) と created_on を付ける。
+          versions=$(jq -nc \
+            --argjson pct "$pct_map" \
+            --argjson vers "$VERSIONS" '
+            $vers
+            | map({
+                version_id: (.id // .version_id // ""),
+                percentage: ($pct[(.id // .version_id // "")] // 0),
+                created_on: (.metadata.created_on // .created_on // null)
+              })
+            | map(select(.version_id != ""))
+          ') || { echo "::error::failed to join versions/deployments"; exit 1; }
 
           n=$(printf '%s' "$versions" | jq 'length')
           if [ "$n" -eq 0 ]; then
-            echo "::error::no versions parsed from wrangler deployments list (got: $versions)"
+            echo "::error::no versions parsed (deployments=$DEPLOYMENTS versions=$VERSIONS)"
             exit 1
           fi
 
