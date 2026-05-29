@@ -1254,6 +1254,70 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$payload" || echo "::warning::pending-release report failed (best-effort)"
 
+      # ---- traffic-report (Refs ippoan/ci-dashboard#137) ----
+      # deploy 後の worker version traffic split (version_id → percentage) を
+      # ci-dashboard に報告し、/release-wave の Compatibility グラフ下に
+      # 「100% / 0% (no-traffic) がどの version か」を出す。
+      #
+      # 方針: best-effort ではなく **失敗したら CI を block** する (user 指定)。
+      # secret 未設定 / wrangler 取得失敗 / parse 失敗 / POST 失敗のいずれも fail。
+      # worker (= wrangler 管理) のみ対象。nuxt も wrangler deploy する構成なので
+      # project_type に依らず wrangler deployments を引く。
+      - name: Report version traffic split
+        if: inputs.has_deploy && startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
+          RELEASE_WAVE_WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RELEASE_WAVE_WEBHOOK_SECRET:-}" ]; then
+            echo "::error::RELEASE_WAVE_WEBHOOK_SECRET が未設定のため traffic-report を送れません。"
+            echo "::error::org secret RELEASE_WAVE_WEBHOOK_SECRET を caller に渡す (secrets: inherit) か、"
+            echo "::error::traffic 表示が不要なら deploy-release を持たない構成にしてください。"
+            exit 1
+          fi
+
+          # `wrangler deployments list` の JSON から version_id → percentage を組む。
+          # gradual deployment が無い (単一 version 100%) worker でも 1 件は返る。
+          DEPLOYMENTS=$(npx --yes wrangler deployments list --json 2>&1) || {
+            echo "::error::wrangler deployments list failed:"
+            printf '%s\n' "$DEPLOYMENTS"
+            exit 1
+          }
+
+          # 最新 deployment の versions[] を { version_id, percentage } 配列に整形。
+          # wrangler の出力 shape: [{ id, versions: [{ version_id, percentage }], ... }, ...]
+          # (新しい順)。先頭 = 現行 deployment。
+          versions=$(printf '%s' "$DEPLOYMENTS" | jq -c '
+            (if type == "array" then .[0] else . end)
+            | (.versions // [])
+            | map({ version_id: (.version_id // .id // ""), percentage: (.percentage // 0) })
+            | map(select(.version_id != ""))
+          ') || {
+            echo "::error::failed to parse wrangler deployments output:"
+            printf '%s\n' "$DEPLOYMENTS"
+            exit 1
+          }
+
+          n=$(printf '%s' "$versions" | jq 'length')
+          if [ "$n" -eq 0 ]; then
+            echo "::error::no versions parsed from wrangler deployments list (got: $versions)"
+            exit 1
+          fi
+
+          payload=$(jq -nc --arg repo "$REPO" --argjson versions "$versions" \
+            '{repo: $repo, versions: $versions}')
+          echo "reporting traffic split: repo=$REPO versions=$versions"
+          curl -fsS -X POST "$CI_DASHBOARD_BASE/webhooks/release-wave/traffic-report" \
+            -H "X-Release-Wave-Webhook-Secret: $RELEASE_WAVE_WEBHOOK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$payload"
+          echo ""
+          echo "✅ traffic split reported"
+
   publish-dev:
     name: Publish Dev
     needs: [test, typecheck]
