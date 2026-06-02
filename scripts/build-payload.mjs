@@ -21,7 +21,16 @@
 //
 // import せず単体実行可能。mapping (tagsToSymbols/normalizeKind) は test 用に export。
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+
+/** 改行区切りファイルを trim 済み非空行の配列に。未指定/不在は []。 */
+function readLines(path) {
+  if (!path || !existsSync(path)) return [];
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+}
 
 // ctags の kind 名 → search_symbols の kind 語彙に正規化。未知は raw を通す。
 const KIND_MAP = {
@@ -82,8 +91,25 @@ async function main() {
     process.exit(2);
   }
   const symbols = tagsToSymbols(readFileSync(file, "utf8"));
-  const payload = { repo, src_hash: srcHash, head_sha: process.env.GITHUB_SHA, symbols };
-  console.error(`[symbol-index] ${repo}: ${symbols.length} symbols (src_hash ${srcHash.slice(0, 12)})`);
+  const mode = process.env.SYMBOL_MODE === "incremental" ? "incremental" : "full";
+  const payload = {
+    repo,
+    src_hash: srcHash,
+    head_sha: process.env.GITHUB_SHA,
+    mode,
+    symbols,
+  };
+  if (mode === "incremental") {
+    payload.changed_files = readLines(process.env.SYMBOL_CHANGED_FILE);
+    payload.deleted_files = readLines(process.env.SYMBOL_DELETED_FILE);
+    console.error(
+      `[symbol-index] ${repo}: incremental — ${symbols.length} symbols in ` +
+        `${payload.changed_files.length} changed, ${payload.deleted_files.length} deleted ` +
+        `(src_hash ${srcHash.slice(0, 12)})`,
+    );
+  } else {
+    console.error(`[symbol-index] ${repo}: full — ${symbols.length} symbols (src_hash ${srcHash.slice(0, 12)})`);
+  }
 
   if (process.env.SYMBOL_DRY_RUN === "1") {
     process.stdout.write(JSON.stringify(payload));
