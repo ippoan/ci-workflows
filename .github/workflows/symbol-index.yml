@@ -57,6 +57,8 @@ jobs:
     steps:
       - name: Checkout caller repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # incremental の git diff に履歴が要る
 
       - name: Install universal-ctags
         run: |
@@ -64,15 +66,53 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y universal-ctags
 
+      # 前回 index した head_sha を ci-dashboard から取得し、初回/基点不明なら
+      # full、そうでなければ git diff で変更/削除ファイルを出して incremental。
+      - name: Determine baseline (incremental vs full)
+        id: baseline
+        env:
+          SYMBOL_REPO: ${{ inputs.repo_name }}
+          INGEST_URL: ${{ inputs.ingest_url }}
+        run: |
+          set -euo pipefail
+          base="${INGEST_URL%/internal/symbol-index}"
+          last="$(curl -fsS --max-time 15 "${base}/symbol-index/head/${SYMBOL_REPO}" 2>/dev/null \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("head_sha") or "")' 2>/dev/null || echo "")"
+          : > changed_files.txt
+          : > deleted_files.txt
+          mode=full
+          if [ -n "$last" ] && git cat-file -e "${last}^{commit}" 2>/dev/null; then
+            mode=incremental
+            git diff --name-only --diff-filter=ACMR "$last" HEAD > changed_files.txt
+            git diff --name-only --diff-filter=D   "$last" HEAD > deleted_files.txt
+            echo "incremental from ${last}: changed=$(wc -l < changed_files.txt) deleted=$(wc -l < deleted_files.txt)"
+          else
+            echo "full scan (baseline ${last:-none} not usable)"
+          fi
+          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+
       - name: Extract symbols (ctags JSON)
         env:
           LANGS: ${{ inputs.languages }}
+          MODE: ${{ steps.baseline.outputs.mode }}
         run: |
           set -euo pipefail
-          if [ -n "$LANGS" ]; then
-            ctags -R --output-format=json --fields=+ne --languages="$LANGS" -f tags.json . || true
+          if [ "$MODE" = "incremental" ]; then
+            if [ -s changed_files.txt ]; then
+              if [ -n "$LANGS" ]; then
+                ctags --output-format=json --fields=+ne --languages="$LANGS" -L changed_files.txt -f tags.json || true
+              else
+                ctags --output-format=json --fields=+ne -L changed_files.txt -f tags.json || true
+              fi
+            else
+              : > tags.json
+            fi
           else
-            ctags -R --output-format=json --fields=+ne -f tags.json . || true
+            if [ -n "$LANGS" ]; then
+              ctags -R --output-format=json --fields=+ne --languages="$LANGS" -f tags.json . || true
+            else
+              ctags -R --output-format=json --fields=+ne -f tags.json . || true
+            fi
           fi
           echo "tags lines: $(wc -l < tags.json 2>/dev/null || echo 0)"
 
@@ -89,8 +129,11 @@ jobs:
           SYMBOL_REPO: ${{ inputs.repo_name }}
           SYMBOL_INGEST_URL: ${{ inputs.ingest_url }}
           SYMBOL_INGEST_SECRET: ${{ secrets.ingest_secret }}
+          SYMBOL_MODE: ${{ steps.baseline.outputs.mode }}
         run: |
           set -euo pipefail
           SYMBOL_SRC_HASH="$(git rev-parse 'HEAD^{tree}')"
           export SYMBOL_SRC_HASH
+          export SYMBOL_CHANGED_FILE="${PWD}/changed_files.txt"
+          export SYMBOL_DELETED_FILE="${PWD}/deleted_files.txt"
           node _ci-workflows/scripts/build-payload.mjs
