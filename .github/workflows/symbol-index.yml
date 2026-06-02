@@ -2,9 +2,9 @@ name: Symbol Index
 
 # cross-repo symbol index の generator (reusable)。
 #
-# caller repo の test job の後で呼ぶ。test が依存をビルド済み (cargo build /
-# npm ci) なので、その温まった状態を再利用して universal-ctags で symbol を
-# 抽出し、ci-dashboard の D1 (POST /internal/symbol-index) に投入する。
+# caller repo の main push 時に呼ぶ。universal-ctags でソースから symbol を抽出し
+# (依存ビルド不要)、ci-dashboard の D1 (POST /webhooks/symbol-index、CF Access
+# bypass 配下) に投入する。初回フル → 以後は前回 head_sha からの git 差分のみ。
 #
 # install.sh で cold に走らせると毎 session 依存解決を繰り返すため、CI 側で
 # 行う。消費側 (Claude) は ci-dashboard の search_symbols を呼ぶだけ。
@@ -31,7 +31,7 @@ on:
         description: "ci-dashboard の ingest endpoint"
         type: string
         required: false
-        default: https://ci-dashboard.ippoan.org/internal/symbol-index
+        default: https://ci-dashboard.ippoan.org/webhooks/symbol-index
       languages:
         description: "ctags の --languages フィルタ (カンマ区切り)。空 = 全言語"
         type: string
@@ -58,13 +58,17 @@ jobs:
       - name: Checkout caller repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # incremental の git diff に履歴が要る
+          # incremental の git diff に履歴が要るが fetch-depth:0 (全履歴) は遅い。
+          # 直近 200 commit で基点が辿れなければ full に倒す (下の fallback)。
+          fetch-depth: 200
 
       - name: Install universal-ctags
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y universal-ctags
+          # runner の apt cache が新しければ update 無しで入る (速い)。
+          # 失敗時だけ update して入れ直す (確実)。
+          sudo apt-get install -y --no-install-recommends universal-ctags \
+            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends universal-ctags; }
 
       # 前回 index した head_sha を ci-dashboard から取得し、初回/基点不明なら
       # full、そうでなければ git diff で変更/削除ファイルを出して incremental。
@@ -75,8 +79,7 @@ jobs:
           INGEST_URL: ${{ inputs.ingest_url }}
         run: |
           set -euo pipefail
-          base="${INGEST_URL%/internal/symbol-index}"
-          last="$(curl -fsS --max-time 15 "${base}/symbol-index/head/${SYMBOL_REPO}" 2>/dev/null \
+          last="$(curl -fsS --max-time 15 "${INGEST_URL}/head/${SYMBOL_REPO}" 2>/dev/null \
             | python3 -c 'import json,sys; print(json.load(sys.stdin).get("head_sha") or "")' 2>/dev/null || echo "")"
           : > changed_files.txt
           : > deleted_files.txt
@@ -108,10 +111,12 @@ jobs:
               : > tags.json
             fi
           else
+            # full は repo 全体だが、.git / 依存 / ビルド成果物は走査しない (速度)。
+            EX="--exclude=.git --exclude=node_modules --exclude=dist --exclude=.wrangler --exclude=target --exclude=coverage --exclude=build --exclude=.next"
             if [ -n "$LANGS" ]; then
-              ctags -R --output-format=json --fields=+ne --languages="$LANGS" -f tags.json . || true
+              ctags -R $EX --output-format=json --fields=+ne --languages="$LANGS" -f tags.json . || true
             else
-              ctags -R --output-format=json --fields=+ne -f tags.json . || true
+              ctags -R $EX --output-format=json --fields=+ne -f tags.json . || true
             fi
           fi
           echo "tags lines: $(wc -l < tags.json 2>/dev/null || echo 0)"
