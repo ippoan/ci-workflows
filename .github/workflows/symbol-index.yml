@@ -1,0 +1,96 @@
+name: Symbol Index
+
+# cross-repo symbol index の generator (reusable)。
+#
+# caller repo の test job の後で呼ぶ。test が依存をビルド済み (cargo build /
+# npm ci) なので、その温まった状態を再利用して universal-ctags で symbol を
+# 抽出し、ci-dashboard の D1 (POST /internal/symbol-index) に投入する。
+#
+# install.sh で cold に走らせると毎 session 依存解決を繰り返すため、CI 側で
+# 行う。消費側 (Claude) は ci-dashboard の search_symbols を呼ぶだけ。
+#
+# 設計: ippoan/claude-skills の cross-repo-symbol-index skill。
+# スクリプト: scripts/build-payload.mjs。投入先: ippoan/ci-dashboard。
+#
+# 呼び出し例 (caller):
+#   symbol-index:
+#     needs: [test]
+#     uses: ippoan/ci-workflows/.github/workflows/symbol-index.yml@main
+#     secrets:
+#       ingest_secret: ${{ secrets.SYMBOL_INDEX_INGEST_SECRET }}
+
+on:
+  workflow_call:
+    inputs:
+      repo_name:
+        description: "index に記録する短い repo 名 (default: このリポジトリ名)"
+        type: string
+        required: false
+        default: ${{ github.event.repository.name }}
+      ingest_url:
+        description: "ci-dashboard の ingest endpoint"
+        type: string
+        required: false
+        default: https://ci-dashboard.ippoan.org/internal/symbol-index
+      languages:
+        description: "ctags の --languages フィルタ (カンマ区切り)。空 = 全言語"
+        type: string
+        required: false
+        default: ""
+      scripts_ref:
+        description: "generator スクリプトを取得する ci-workflows の ref"
+        type: string
+        required: false
+        default: main
+    secrets:
+      ingest_secret:
+        description: "ingest endpoint の Bearer secret (SYMBOL_INDEX_INGEST_SECRET)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  symbol-index:
+    name: Extract & push symbols
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+
+      - name: Install universal-ctags
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y universal-ctags
+
+      - name: Extract symbols (ctags JSON)
+        env:
+          LANGS: ${{ inputs.languages }}
+        run: |
+          set -euo pipefail
+          if [ -n "$LANGS" ]; then
+            ctags -R --output-format=json --fields=+ne --languages="$LANGS" -f tags.json . || true
+          else
+            ctags -R --output-format=json --fields=+ne -f tags.json . || true
+          fi
+          echo "tags lines: $(wc -l < tags.json 2>/dev/null || echo 0)"
+
+      - name: Checkout generator scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ippoan/ci-workflows
+          ref: ${{ inputs.scripts_ref }}
+          path: _ci-workflows
+          sparse-checkout: scripts
+
+      - name: Build payload & push to index
+        env:
+          SYMBOL_REPO: ${{ inputs.repo_name }}
+          SYMBOL_INGEST_URL: ${{ inputs.ingest_url }}
+          SYMBOL_INGEST_SECRET: ${{ secrets.ingest_secret }}
+        run: |
+          set -euo pipefail
+          SYMBOL_SRC_HASH="$(git rev-parse 'HEAD^{tree}')"
+          export SYMBOL_SRC_HASH
+          node _ci-workflows/scripts/build-payload.mjs
