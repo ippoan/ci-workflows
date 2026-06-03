@@ -906,7 +906,12 @@ jobs:
       needs.dispatch.outputs.platform == 'cloudrun'
     runs-on: ubuntu-latest
     steps:
+      # pending_release flip (= Pending releases の Flip / Flip all 経由) には
+      # 対応する wave が無いので flip-report を送らない (NOT_FOUND で 404 → curl
+      # -fsS が fail し callback job が赤くなる)。cf-workers の flip-report と同じ
+      # ガード。Refs ippoan/ci-dashboard#181 / #237。
       - name: Callback flip-report
+        if: github.event.client_payload.pending_release != true
         env:
           WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
           REPO: ${{ github.repository }}
