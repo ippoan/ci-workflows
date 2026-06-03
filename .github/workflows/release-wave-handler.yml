@@ -533,8 +533,8 @@ jobs:
   # Cloud Run path (Phase 4c)
   #
   # Stage 段は ci-workflows#96② で撤去した。no-traffic revision の用意は repo 側
-  # deploy.yml (tag push で --no-traffic --tag pending-<...> deploy) + frontend-ci
-  # 相当の pending-release 報告に一本化する。
+  # deploy.yml (tag push で --no-traffic deploy) + frontend-ci 相当の
+  # pending-release 報告に一本化する。
   #
   # Flip / Rollback は release-wave-gcp Cloud Run proxy を経由して
   # gcloud run services update-traffic 等価操作を行う。各 service に対して
@@ -552,34 +552,23 @@ jobs:
       matrix:
         service: ${{ fromJSON(needs.dispatch.outputs.services_json) }}
     steps:
-      - name: Sanitize tag for revision tag
-        id: sanitize
-        env:
-          TARGET_TAG: ${{ needs.dispatch.outputs.target_tag }}
-        run: |
-          set -euo pipefail
-          # Cloud Run revision tag は `[a-z0-9-]{1,63}` 制約 (lowercase only)。
-          # target_tag (e.g. v1.42.0) を `pending-v1-42-0` 形に変換する。
-          sanitized=$(printf '%s' "$TARGET_TAG" | tr 'A-Z' 'a-z' | tr '.' '-')
-          echo "tag=pending-${sanitized}" >> "$GITHUB_OUTPUT"
-
       - name: Call release-wave-gcp /cloudrun/flip-traffic
         env:
           GCP_PROJECT: ${{ needs.dispatch.outputs.gcp_project }}
           GCP_REGION: ${{ needs.dispatch.outputs.gcp_region }}
           SERVICE: ${{ matrix.service }}
-          TO_TAG: ${{ steps.sanitize.outputs.tag }}
           GCP_BASE: ${{ inputs.release_wave_gcp_base_url }}
           GCP_API_KEY: ${{ secrets.RELEASE_WAVE_GCP_API_KEY }}
         run: |
           set -euo pipefail
+          # flip は proxy 側で service の最新 ready revision (= no-traffic deploy で
+          # 上がった revision) に traffic を 100% 振る。揮発する revision tag は
+          # 渡さない (Refs ippoan/ci-dashboard#248)。
           body=$(jq -nc \
             --arg project "$GCP_PROJECT" \
             --arg region "$GCP_REGION" \
             --arg service "$SERVICE" \
-            --arg to_revision_tag "$TO_TAG" \
-            '{project: $project, region: $region, service: $service,
-              to_revision_tag: $to_revision_tag}')
+            '{project: $project, region: $region, service: $service}')
           curl -fsS -X POST "$GCP_BASE/cloudrun/flip-traffic" \
             -H "X-Release-Wave-API-Key: $GCP_API_KEY" \
             -H "Content-Type: application/json" \
