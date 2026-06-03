@@ -250,15 +250,22 @@ jobs:
           # services / monorepo_units は JSON 配列で串刺し
           echo "services_json=$(yq -o=json -I0     ".targets[\"$REPO\"].services       // []" "$CFG")" >> "$GITHUB_OUTPUT"
           echo "monorepo_units_json=$(yq -o=json -I0 ".targets[\"$REPO\"].monorepo_units // []" "$CFG")" >> "$GITHUB_OUTPUT"
-          # per-repo install command (default 'npm install --no-audit --no-fund')。
+          # per-repo install command
+          # (default 'npm install --no-audit --no-fund --ignore-scripts')。
           # 既定を npm install (寛容) にする: stage/flip/rollback は wrangler を動かす
           # だけで strict な再現性は不要な一方、消費 repo は自分の CI で `npm install`
           # を使い lockfile を strict 同期しない運用が多く、handler だけ `npm ci`
           # (strict) だと lockfile drift で即失敗していた (Refs ippoan/ci-dashboard#237)。
-          # strict にしたい repo は targets.yaml で install_command: 'npm ci' を明示。
+          # `--ignore-scripts` 必須: 本 job は CLOUDFLARE_API_TOKEN /
+          # RELEASE_WAVE_GCP_API_KEY 等の deploy secret を持つため、npm install が
+          # lockfile drift で resolve する未固定 transitive dep の postinstall script
+          # が secret 環境で任意実行されるのを防ぐ (supply-chain hardening)。flip /
+          # rollback は `wrangler versions deploy` を動かすだけで postinstall 不要。
+          # build に postinstall が要る repo は targets.yaml で install_command を明示。
+          # strict にしたい repo は install_command: 'npm ci' を指定。
           # config は ci-workflows committer が管理する trusted input。
           # `-r` (raw) で quote を剥がす → bash -c に直接渡せる文字列にする。
-          echo "install_command=$(yq -r ".targets[\"$REPO\"].install_command // \"npm install --no-audit --no-fund\"" "$CFG")" >> "$GITHUB_OUTPUT"
+          echo "install_command=$(yq -r ".targets[\"$REPO\"].install_command // \"npm install --no-audit --no-fund --ignore-scripts\"" "$CFG")" >> "$GITHUB_OUTPUT"
           # npm_scope (e.g. @ippoan) を渡すと setup-node が
           # registry-url=https://npm.pkg.github.com + scope を .npmrc に書く。
           # NODE_AUTH_TOKEN=secrets.GITHUB_TOKEN で GitHub Packages 認証。
