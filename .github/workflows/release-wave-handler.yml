@@ -506,6 +506,22 @@ jobs:
             npx wrangler deploy
           fi
 
+      # flip 後の version traffic split を ci-dashboard に報告し、Traffic 表示を
+      # 実機 (Cloudflare) に追従させる。UI 駆動 flip (flip-all / 単一 Flip) では
+      # frontend-ci の deploy job を通らず traffic-report が来ないため、ここで送る。
+      # best-effort (flip は成功済みなので報告失敗で job を fail させない)。
+      # Refs ippoan/ci-dashboard#237。
+      - name: Report version traffic split
+        uses: ippoan/ci-workflows/.github/actions/report-traffic-split@main
+        with:
+          cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          cloudflare_account_id: ${{ needs.dispatch.outputs.cf_account_id }}
+          ci_dashboard_base_url: ${{ inputs.callback_base_url }}
+          webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+          repo: ${{ github.repository }}
+          uploaded_version_id: ${{ github.event.client_payload.previewed_version_id }}
+          tag: ${{ needs.dispatch.outputs.target_tag }}
+
       # pending_release flip (= 単独リリースの Flip ボタン経由) には対応する
       # wave が無いので flip-report を送らない (NOT_FOUND になるだけ)。
       # Refs ippoan/ci-dashboard#181。
@@ -608,6 +624,19 @@ jobs:
             npx wrangler rollback
           fi
 
+      # rollback 後の traffic split を ci-dashboard に報告 (Traffic 表示を実機に追従)。
+      # Refs ippoan/ci-dashboard#237。
+      - name: Report version traffic split
+        uses: ippoan/ci-workflows/.github/actions/report-traffic-split@main
+        with:
+          cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          cloudflare_account_id: ${{ needs.dispatch.outputs.cf_account_id }}
+          ci_dashboard_base_url: ${{ inputs.callback_base_url }}
+          webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+          repo: ${{ github.repository }}
+          uploaded_version_id: ${{ github.event.client_payload.flip_from_revision }}
+          tag: ${{ needs.dispatch.outputs.target_tag }}
+
       # rollback 完了 callback は現状 state machine に無い (= release_wave_rollback
       # MCP tool が caller-driven で wave state を rolled-back に進める設計)。
       # 進捗確認のため別途 ci-dashboard を更新する想定。
@@ -658,6 +687,19 @@ jobs:
           fi
           echo "traffic rollback: deploy version $VID @100%"
           npx wrangler versions deploy "${VID}@100%" --yes
+
+      # rollback 後の traffic split を ci-dashboard に報告 (Traffic 表示を実機に追従)。
+      # Refs ippoan/ci-dashboard#237。
+      - name: Report version traffic split
+        uses: ippoan/ci-workflows/.github/actions/report-traffic-split@main
+        with:
+          cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          cloudflare_account_id: ${{ needs.dispatch.outputs.cf_account_id }}
+          ci_dashboard_base_url: ${{ inputs.callback_base_url }}
+          webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+          repo: ${{ github.repository }}
+          uploaded_version_id: ${{ github.event.client_payload.previewed_version_id }}
+          tag: ${{ needs.dispatch.outputs.target_tag }}
 
   # =========================================================================
   # Cloud Run path (Phase 4c)
