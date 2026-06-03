@@ -21,7 +21,7 @@ targets:
   "ippoan/rust-alc-api":
     platform: cloudrun
     services:
-      - rust-alc-api-backend
+      - rust-alc-api
       - rust-alc-api-gateway
       - rust-alc-api-tenko
       - rust-alc-api-carins
