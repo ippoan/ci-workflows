@@ -59,6 +59,11 @@ targets:
       - name: notify-realtime-bus
         preview_hostname: preview-realtime.notify.ippoan.org
     cf_account_id: 24b45709d060d957340180e995f0d373
+    # @ippoan/auth-client (StagingFooter 等、private GitHub Packages dep) を
+    # install するため。未設定だと flip/rollback の npm install が
+    # 401 Unauthorized で落ちる (setup-node の registry-url + scope +
+    # NODE_AUTH_TOKEN が設定されない)。
+    npm_scope: '@ippoan'
 
   "ippoan/alc-app":
     platform: cloudflare-workers
@@ -77,3 +82,13 @@ targets:
     cf_worker_name: nuxt-egov
     cf_account_id: 24b45709d060d957340180e995f0d373
     preview_hostname: preview-egov.ippoan.org
+
+  # nuxt-trouble (トラブル/状況管理 frontend、worker 名 nuxt-trouble)。
+  # @ippoan/auth-client (StagingFooter) を使うので npm_scope 必須。
+  # release-wave.yml caller は repo 側に配置済み。
+  "ippoan/nuxt-trouble":
+    platform: cloudflare-workers
+    cf_worker_name: nuxt-trouble
+    cf_account_id: 24b45709d060d957340180e995f0d373
+    preview_hostname: preview-trouble.ippoan.org
+    npm_scope: '@ippoan'
