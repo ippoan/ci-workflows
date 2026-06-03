@@ -1,0 +1,123 @@
+name: Report version traffic split
+description: >-
+  Cloudflare Worker の version traffic split (wrangler deployments/versions list)
+  を ci-dashboard の /webhooks/release-wave/traffic-report に送る。flip /
+  traffic-rollback など UI 駆動の `wrangler versions deploy` 後に呼び、dashboard
+  の Traffic 表示を実機 (Cloudflare) の状態に追従させる (Refs ippoan/ci-dashboard#237)。
+  best-effort: flip 自体は既に成功しているので、報告失敗で job を fail させない。
+
+inputs:
+  cloudflare_api_token:
+    description: Cloudflare API token (wrangler 用)
+    required: true
+  cloudflare_account_id:
+    description: Cloudflare account id (wrangler.toml に account_id がある repo は空でも可)
+    required: false
+    default: ""
+  ci_dashboard_base_url:
+    description: ci-dashboard base URL (= callback_base_url)
+    required: true
+  webhook_secret:
+    description: RELEASE_WAVE_WEBHOOK_SECRET
+    required: true
+  repo:
+    description: '"owner/name"'
+    required: true
+  uploaded_version_id:
+    description: tag を紐付ける version id (flip/rollback 対象)。省略可。
+    required: false
+    default: ""
+  tag:
+    description: 上記 version に紐付ける release tag。省略可。
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Report version traffic split (best-effort)
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ inputs.cloudflare_api_token }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.cloudflare_account_id }}
+        CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
+        RELEASE_WAVE_WEBHOOK_SECRET: ${{ inputs.webhook_secret }}
+        REPO: ${{ inputs.repo }}
+        UPLOADED_VID: ${{ inputs.uploaded_version_id }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -uo pipefail
+
+        if [ -z "${RELEASE_WAVE_WEBHOOK_SECRET:-}" ]; then
+          echo "::warning::RELEASE_WAVE_WEBHOOK_SECRET 未設定のため traffic-report を skip (flip は成功済み)"
+          exit 0
+        fi
+        if [ -z "${CI_DASHBOARD_BASE:-}" ]; then
+          echo "::warning::ci_dashboard_base_url 未設定のため traffic-report を skip"
+          exit 0
+        fi
+
+        # stdout から最初の JSON 配列だけを取り出す (wrangler/npm の warning 行除去)。
+        strip_json() { sed -n '/^[[:space:]]*\[/,$p'; }
+
+        # 1) deployments list → active deployment の version_id → percentage。
+        D_RAW=$(npx --yes wrangler deployments list --json 2>/dev/null) || {
+          echo "::warning::wrangler deployments list failed; traffic-report skip"; exit 0; }
+        DEPLOYMENTS=$(printf '%s' "$D_RAW" | strip_json)
+        if [ -z "$DEPLOYMENTS" ]; then
+          echo "::warning::deployments list に JSON 配列が無い; traffic-report skip"; exit 0; fi
+        pct_map=$(printf '%s' "$DEPLOYMENTS" | jq -c '
+          (if type == "array" then (.[-1] // {}) else . end)
+          | (.versions // [])
+          | map({ key: (.version_id // .id // ""), value: (.percentage // 0) })
+          | map(select(.key != ""))
+          | from_entries
+        ') || { echo "::warning::deployments list parse 失敗; skip"; exit 0; }
+
+        # 2) versions list → 直近 version 群 (id + created_on)。
+        V_RAW=$(npx --yes wrangler versions list --json 2>/dev/null) || {
+          echo "::warning::wrangler versions list failed; traffic-report skip"; exit 0; }
+        VERSIONS=$(printf '%s' "$V_RAW" | strip_json)
+        if [ -z "$VERSIONS" ]; then
+          echo "::warning::versions list に JSON 配列が無い; traffic-report skip"; exit 0; fi
+
+        # 3) join: 各 version に percentage (無ければ 0) と created_on を付け、
+        #    UPLOADED_VID にだけ release tag を紐付ける。active 全件 + 0% は直近 20 件。
+        versions=$(jq -nc \
+          --argjson pct "$pct_map" \
+          --argjson vers "$VERSIONS" \
+          --arg uploaded "${UPLOADED_VID:-}" \
+          --arg tag "${TAG:-}" '
+          ($vers
+            | map({
+                version_id: (.id // .version_id // ""),
+                percentage: ($pct[(.id // .version_id // "")] // 0),
+                created_on: (.metadata.created_on // .created_on // null),
+                tag: (if ($uploaded != "" and (.id // .version_id // "") == $uploaded and $tag != "")
+                      then $tag else null end)
+              })
+            | map(select(.version_id != ""))
+          ) as $all
+          | ($all | map(select(.percentage > 0))) as $active
+          | ($all | map(select(.percentage <= 0))
+                  | sort_by(.created_on // "") | reverse | .[0:20]) as $zero
+          | ($active + $zero)
+          | map(with_entries(select(.value != null)))
+        ') || { echo "::warning::versions/deployments join 失敗; skip"; exit 0; }
+
+        n=$(printf '%s' "$versions" | jq 'length' 2>/dev/null || echo 0)
+        if [ "$n" -eq 0 ]; then
+          echo "::warning::version が 0 件; traffic-report skip"; exit 0; fi
+
+        payload=$(jq -nc --arg repo "$REPO" --argjson versions "$versions" \
+          '{repo: $repo, versions: $versions}')
+        echo "reporting traffic split: repo=$REPO ($n versions)"
+        if curl -fsS -X POST "$CI_DASHBOARD_BASE/webhooks/release-wave/traffic-report" \
+          -H "X-Release-Wave-Webhook-Secret: $RELEASE_WAVE_WEBHOOK_SECRET" \
+          -H "Content-Type: application/json" \
+          -d "$payload"; then
+          echo ""
+          echo "✅ traffic split reported"
+        else
+          echo "::warning::traffic-report POST 失敗 (best-effort; flip は成功済み)"
+        fi
