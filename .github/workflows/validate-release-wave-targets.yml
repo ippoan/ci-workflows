@@ -1,0 +1,47 @@
+name: Validate Release Wave Targets
+
+# release-wave-targets.yaml の設定ミスを早期検知する。
+#
+# - PR: yaml / validator / 本 workflow を変更した時に走らせる。
+# - schedule: consumer repo 側の変更 (caller 追加 / @ippoan dep 追加) で
+#   生じる drift を日次で検知する (= targets.yaml 無変更でも気付ける)。
+# - workflow_dispatch: 手動再実行用。
+#
+# 検査内容は scripts/validate_release_wave_targets.py を参照。
+
+on:
+  pull_request:
+    paths:
+      - 'config/release-wave-targets.yaml'
+      - 'scripts/validate_release_wave_targets.py'
+      - '.github/workflows/validate-release-wave-targets.yml'
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+
+      - name: Selftest (pure logic regression guard)
+        run: python3 scripts/validate_release_wave_targets.py --selftest
+
+      - name: Validate release-wave-targets.yaml
+        env:
+          # public repo の contents / org repo list を読むのに使う。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ONLINE: '1'
+          WAVE_ORGS: 'ippoan'
+        run: python3 scripts/validate_release_wave_targets.py
