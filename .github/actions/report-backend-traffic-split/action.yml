@@ -1,0 +1,124 @@
+name: Report backend traffic split
+description: >-
+  Cloud Run service の実 traffic split (status.traffic[]) を release-wave-gcp の
+  /cloudrun/stage-check (GetService) で取得し、ci-dashboard の
+  /webhooks/release-wave/backend-traffic-report に送る。flip / rollback / deploy
+  直後に呼び、dashboard の「Backend traffic」表示を GCP 実態に追従させる
+  (Refs ippoan/ci-dashboard#256)。frontend の report-traffic-split (Cloudflare
+  Workers の version split) と対称。best-effort: 操作自体は成功済みなので報告
+  失敗で job を fail させない。
+
+inputs:
+  repo:
+    description: '"owner/name"'
+    required: true
+  gcp_project:
+    description: Cloud Run service が居る GCP project
+    required: true
+  gcp_region:
+    description: Cloud Run region
+    required: true
+  services_json:
+    description: 'service 名の JSON 配列 (例 ["rust-alc-api","rust-alc-api-gateway"])'
+    required: true
+  release_wave_gcp_base_url:
+    description: release-wave-gcp Cloud Run service URL
+    required: true
+  gcp_api_key:
+    description: RELEASE_WAVE_GCP_API_KEY (release-wave-gcp 認証)
+    required: true
+  ci_dashboard_base_url:
+    description: ci-dashboard base URL (= callback_base_url)
+    required: true
+  webhook_secret:
+    description: RELEASE_WAVE_WEBHOOK_SECRET
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Report backend traffic split (best-effort)
+      shell: bash
+      env:
+        REPO: ${{ inputs.repo }}
+        GCP_PROJECT: ${{ inputs.gcp_project }}
+        GCP_REGION: ${{ inputs.gcp_region }}
+        SERVICES_JSON: ${{ inputs.services_json }}
+        GCP_BASE: ${{ inputs.release_wave_gcp_base_url }}
+        GCP_API_KEY: ${{ inputs.gcp_api_key }}
+        CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
+        RELEASE_WAVE_WEBHOOK_SECRET: ${{ inputs.webhook_secret }}
+      run: |
+        set -uo pipefail
+
+        if [ -z "${RELEASE_WAVE_WEBHOOK_SECRET:-}" ]; then
+          echo "::warning::RELEASE_WAVE_WEBHOOK_SECRET 未設定のため backend-traffic-report を skip"; exit 0; fi
+        if [ -z "${CI_DASHBOARD_BASE:-}" ]; then
+          echo "::warning::ci_dashboard_base_url 未設定のため backend-traffic-report を skip"; exit 0; fi
+        if [ -z "${GCP_BASE:-}" ] || [ -z "${GCP_API_KEY:-}" ]; then
+          echo "::warning::release-wave-gcp base/api-key 未設定のため backend-traffic-report を skip"; exit 0; fi
+        if [ -z "${SERVICES_JSON:-}" ]; then
+          echo "::warning::services_json 未設定のため backend-traffic-report を skip"; exit 0; fi
+
+        # 各 service の stage-check を叩いて status.traffic[] を取得 → 正規化し、
+        # repo 全体の services[] を 1 payload にまとめて 1 回 POST する (matrix の
+        # 各 service が個別 POST すると repo 単位 record の上書き合戦になるため、
+        # 呼び出し側は「全 service 完了後に 1 回」呼ぶ)。
+        services_out='[]'
+        while IFS= read -r service; do
+          [ -z "$service" ] && continue
+          req=$(jq -nc --arg p "$GCP_PROJECT" --arg r "$GCP_REGION" --arg s "$service" \
+            '{project:$p, region:$r, service:$s}')
+          resp=$(curl -fsS -X POST "$GCP_BASE/cloudrun/stage-check" \
+            -H "X-Release-Wave-API-Key: $GCP_API_KEY" \
+            -H "Content-Type: application/json" -d "$req" 2>/dev/null) || {
+            echo "::warning::stage-check failed for $service; skip this service"; continue; }
+
+          ok=$(printf '%s' "$resp" | jq -r '.ok // false' 2>/dev/null || echo false)
+          if [ "$ok" != "true" ]; then
+            echo "::warning::stage-check ok!=true for $service; skip"; continue; fi
+
+          # traffic[] を {revision, percent, tag} に正規化。revision 空 (type=LATEST)
+          # は latest_ready_revision (basename) で補完。
+          revisions=$(printf '%s' "$resp" | jq -c '
+            (.status.latest_ready_revision // "" | split("/") | .[-1]) as $lr
+            | (.status.traffic // [])
+            | map({
+                revision: (if (.revision // "") != "" then .revision else $lr end),
+                percent: (.percent // 0),
+                tag: (.tag // null)
+              })
+            | map(select(.revision != ""))
+          ' 2>/dev/null || echo '[]')
+
+          # latest_created_revision (= 直近 deploy で上がった revision) が traffic に
+          # 無ければ 0% pending として足す。--no-traffic deploy 直後 (flip 前) の
+          # 「新 revision が 0% で待機」を Traffic 表に出すため。flip 後は latest_created
+          # が traffic に 100% で入るので足さない (重複しない)。
+          lc=$(printf '%s' "$resp" | jq -r '.status.latest_created_revision // "" | split("/") | .[-1]' 2>/dev/null || echo "")
+          if [ -n "$lc" ]; then
+            has_lc=$(printf '%s' "$revisions" | jq --arg lc "$lc" 'any(.revision == $lc)' 2>/dev/null || echo true)
+            if [ "$has_lc" = "false" ]; then
+              revisions=$(printf '%s' "$revisions" | jq -c --arg lc "$lc" '. + [{revision:$lc, percent:0, tag:null}]')
+            fi
+          fi
+
+          entry=$(jq -nc --arg s "$service" --argjson revs "$revisions" '{service:$s, revisions:$revs}')
+          services_out=$(printf '%s' "$services_out" | jq -c --argjson e "$entry" '. + [$e]')
+        done < <(printf '%s' "$SERVICES_JSON" | jq -r '.[]')
+
+        n=$(printf '%s' "$services_out" | jq 'length' 2>/dev/null || echo 0)
+        if [ "$n" -eq 0 ]; then
+          echo "::warning::集計できた service が 0 件; backend-traffic-report skip"; exit 0; fi
+
+        payload=$(jq -nc --arg repo "$REPO" --argjson services "$services_out" \
+          '{repo:$repo, services:$services}')
+        echo "reporting backend traffic: repo=$REPO ($n services)"
+        if curl -fsS -X POST "$CI_DASHBOARD_BASE/webhooks/release-wave/backend-traffic-report" \
+          -H "X-Release-Wave-Webhook-Secret: $RELEASE_WAVE_WEBHOOK_SECRET" \
+          -H "Content-Type: application/json" -d "$payload"; then
+          echo ""
+          echo "✅ backend traffic reported"
+        else
+          echo "::warning::backend-traffic-report POST 失敗 (best-effort; traffic 操作は成功済み)"
+        fi
