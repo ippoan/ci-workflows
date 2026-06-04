@@ -373,7 +373,17 @@ jobs:
       # flip 成功 = この backend の現 production image が target_tag になった。
       # compatibility matrix の基準 (backend::<repo>.current_image) を更新する。
       # (Refs ippoan/ci-dashboard#157 — backend deploy report)
+      #
+      # pending_release flip (= Pending releases の Flip / Flip all 経由) では
+      # 送らない。pending flip は「すでに deploy 済みの revision を 100% に flip
+      # するだけ」で、その image は repo 側 deploy が既に backend-deploy-report で
+      # 記録済み。ここで再 report すると current_image を target_tag (git tag) に、
+      # wave_id を `pending-<repo>-<時刻>` に上書きしてしまい、frontend が記録した
+      # backend_image (= commit SHA) と軸が食い違って全 consumer が untested 扱いに
+      # なり retest UI が乱立する。flip-report と同じ pending_release ガードを掛ける。
+      # Refs ippoan/ci-dashboard#181 / #237。
       - name: Report backend deploy (compatibility)
+        if: github.event.client_payload.pending_release != true
         uses: ippoan/ci-workflows/.github/actions/report-backend-deploy@main
         with:
           ci_dashboard_base_url: ${{ inputs.callback_base_url }}
@@ -616,8 +626,16 @@ jobs:
       # 全 service の flip が成功した時のみ、現 production image を target_tag に
       # 更新する。matrix 失敗時 (= 一部 service が旧 revision のまま) は記録しない。
       # (Refs ippoan/ci-dashboard#157 — backend deploy report)
+      #
+      # pending_release flip (= Pending releases の Flip / Flip all 経由) では
+      # 送らない。pending flip は repo 側 deploy が既に backend-deploy-report で
+      # 記録済みの image を 100% へ flip するだけで、ここで再 report すると
+      # current_image を target_tag (git tag) に、wave_id を `pending-<repo>-<時刻>`
+      # に上書きしてしまう。frontend は backend_image を commit SHA で記録するため
+      # 軸が食い違い、全 consumer が untested 扱いになって retest UI が乱立する。
+      # flip-report と同じ pending_release ガードを掛ける。Refs ippoan/ci-dashboard#181 / #237。
       - name: Report backend deploy (compatibility)
-        if: needs.flip-cloudrun.result == 'success'
+        if: needs.flip-cloudrun.result == 'success' && github.event.client_payload.pending_release != true
         uses: ippoan/ci-workflows/.github/actions/report-backend-deploy@main
         with:
           ci_dashboard_base_url: ${{ inputs.callback_base_url }}
