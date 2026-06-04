@@ -628,6 +628,21 @@ jobs:
           wave_id: ${{ needs.dispatch.outputs.wave_id }}
           webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
 
+      # flip 後の実 traffic split (status.traffic[]) を ci-dashboard に報告し、
+      # 「Backend traffic」表示を GCP 実態に追従させる (Refs ippoan/ci-dashboard#256)。
+      - name: Report backend traffic split
+        if: needs.flip-cloudrun.result == 'success'
+        uses: ippoan/ci-workflows/.github/actions/report-backend-traffic-split@main
+        with:
+          repo: ${{ github.repository }}
+          gcp_project: ${{ needs.dispatch.outputs.gcp_project }}
+          gcp_region: ${{ needs.dispatch.outputs.gcp_region }}
+          services_json: ${{ needs.dispatch.outputs.services_json }}
+          release_wave_gcp_base_url: ${{ inputs.release_wave_gcp_base_url }}
+          gcp_api_key: ${{ secrets.RELEASE_WAVE_GCP_API_KEY }}
+          ci_dashboard_base_url: ${{ inputs.callback_base_url }}
+          webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+
   # ---- Rollback (cloudrun): matrix で services[] 並列 ----
   rollback-cloudrun:
     name: Rollback (cloudrun) [${{ matrix.service }}]
@@ -687,6 +702,31 @@ jobs:
       # rollback callback は state machine 上は無いため省略 (= release_wave_rollback
       # MCP tool が caller-driven で state を rolled-back に進めた後、本 job が
       # 副作用として実 traffic 戻しを行う構造)。
+
+  # ---- Rollback callback (cloudrun): 全 service 完了後に実 traffic を 1 回報告 ----
+  rollback-cloudrun-callback:
+    name: Rollback callback (cloudrun)
+    needs: [dispatch, rollback-cloudrun]
+    if: |
+      always() &&
+      needs.dispatch.outputs.event_type == 'release-wave-rollback' &&
+      needs.dispatch.outputs.platform == 'cloudrun'
+    runs-on: ubuntu-latest
+    steps:
+      # rollback 後の実 traffic split を ci-dashboard に報告 (Backend traffic 表示を
+      # GCP 実態に追従させる、Refs ippoan/ci-dashboard#256)。
+      - name: Report backend traffic split
+        if: needs.rollback-cloudrun.result == 'success'
+        uses: ippoan/ci-workflows/.github/actions/report-backend-traffic-split@main
+        with:
+          repo: ${{ github.repository }}
+          gcp_project: ${{ needs.dispatch.outputs.gcp_project }}
+          gcp_region: ${{ needs.dispatch.outputs.gcp_region }}
+          services_json: ${{ needs.dispatch.outputs.services_json }}
+          release_wave_gcp_base_url: ${{ inputs.release_wave_gcp_base_url }}
+          gcp_api_key: ${{ secrets.RELEASE_WAVE_GCP_API_KEY }}
+          ci_dashboard_base_url: ${{ inputs.callback_base_url }}
+          webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
 
   # =========================================================================
   # backend-rollback (cloudrun): 任意の過去 revision へ即 100% で戻す
@@ -748,3 +788,27 @@ jobs:
             -H "X-Release-Wave-API-Key: $GCP_API_KEY" \
             -H "Content-Type: application/json" \
             -d "$body"
+
+  # ---- Backend-rollback callback (cloudrun): 全 service 完了後に実 traffic を報告 ----
+  backend-rollback-cloudrun-callback:
+    name: Backend rollback callback (cloudrun)
+    needs: [dispatch, backend-rollback-cloudrun]
+    if: |
+      always() &&
+      needs.dispatch.outputs.event_type == 'release-wave-backend-rollback' &&
+      needs.dispatch.outputs.platform == 'cloudrun'
+    runs-on: ubuntu-latest
+    steps:
+      # backend-rollback 後の実 traffic split を ci-dashboard に報告 (Refs ippoan/ci-dashboard#256)。
+      - name: Report backend traffic split
+        if: needs.backend-rollback-cloudrun.result == 'success'
+        uses: ippoan/ci-workflows/.github/actions/report-backend-traffic-split@main
+        with:
+          repo: ${{ github.repository }}
+          gcp_project: ${{ needs.dispatch.outputs.gcp_project }}
+          gcp_region: ${{ needs.dispatch.outputs.gcp_region }}
+          services_json: ${{ needs.dispatch.outputs.services_json }}
+          release_wave_gcp_base_url: ${{ inputs.release_wave_gcp_base_url }}
+          gcp_api_key: ${{ secrets.RELEASE_WAVE_GCP_API_KEY }}
+          ci_dashboard_base_url: ${{ inputs.callback_base_url }}
+          webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
