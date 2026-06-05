@@ -88,6 +88,13 @@ on:
         required: false
         type: boolean
         default: false
+      working_directory:
+        description: |
+          cargo を実行する作業ディレクトリ (workspace が subdir にある場合、例: "rust")。
+          デフォルト "." = repo root。dist/ や target/ も同 directory 基準になる。
+        required: false
+        type: string
+        default: '.'
     secrets:
       MCP_INTERNAL_SECRET:
         description: "Optional. Embedded into the release binary at build time via env. See github-mcp-server-rs#25."
@@ -113,6 +120,9 @@ jobs:
       matrix:
         t: ${{ fromJSON(inputs.targets) }}
     runs-on: ${{ matrix.t.os }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
     steps:
       - uses: actions/checkout@v4
 
@@ -131,6 +141,7 @@ jobs:
           # multi-target caller でも衝突しないよう target を key に含める
           shared-key: ${{ inputs.bin_name }}-${{ matrix.t.target }}
           cache-targets: false
+          workspaces: ${{ inputs.working_directory }}
           cache-on-failure: true
           # default-branch push に加え任意の tag push でも save する
           # (旧 `refs/tags/v` 限定だと per-binary `<bin>-v*` / `dev-*` で save されない)
@@ -236,10 +247,10 @@ jobs:
         with:
           name: ${{ steps.meta.outputs.archive_base }}
           path: |
-            dist/${{ steps.meta.outputs.archive_base }}.tar.gz
-            dist/${{ steps.meta.outputs.archive_base }}.tar.gz.sha256
-            dist/${{ steps.meta.outputs.archive_base }}.zip
-            dist/${{ steps.meta.outputs.archive_base }}.zip.sha256
+            ${{ inputs.working_directory }}/dist/${{ steps.meta.outputs.archive_base }}.tar.gz
+            ${{ inputs.working_directory }}/dist/${{ steps.meta.outputs.archive_base }}.tar.gz.sha256
+            ${{ inputs.working_directory }}/dist/${{ steps.meta.outputs.archive_base }}.zip
+            ${{ inputs.working_directory }}/dist/${{ steps.meta.outputs.archive_base }}.zip.sha256
           if-no-files-found: ignore
           retention-days: 7
 

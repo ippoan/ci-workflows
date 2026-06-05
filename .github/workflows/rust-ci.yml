@@ -67,6 +67,11 @@ on:
         required: false
         type: string
         default: '--locked'
+      working_directory:
+        description: 'cargo を実行する作業ディレクトリ (workspace が subdir にある場合、例: "rust")。デフォルト "." = repo root。'
+        required: false
+        type: string
+        default: '.'
     secrets:
       BUILD_SECRET:
         description: 'Optional secret value injected into `cargo build --release` env under `build_secret_env_name`.'
@@ -82,6 +87,9 @@ jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -92,6 +100,9 @@ jobs:
   clippy:
     name: clippy
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -102,12 +113,16 @@ jobs:
         with:
           shared-key: ${{ inputs.shared_key != '' && inputs.shared_key || github.event.repository.name }}
           cache-targets: false
+          workspaces: ${{ inputs.working_directory }}
       - run: cargo clippy ${{ inputs.cargo_clippy_args }}
       - run: sccache --show-stats
 
   test:
     name: cargo test
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -116,12 +131,16 @@ jobs:
         with:
           shared-key: ${{ inputs.shared_key != '' && inputs.shared_key || github.event.repository.name }}
           cache-targets: false
+          workspaces: ${{ inputs.working_directory }}
       - run: cargo test ${{ inputs.cargo_test_args }}
       - run: sccache --show-stats
 
   build:
     name: cargo build --release
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -130,6 +149,7 @@ jobs:
         with:
           shared-key: ${{ inputs.shared_key != '' && inputs.shared_key || github.event.repository.name }}
           cache-targets: false
+          workspaces: ${{ inputs.working_directory }}
       - name: cargo build --release
         env:
           BUILD_SECRET: ${{ secrets.BUILD_SECRET }}
@@ -159,6 +179,6 @@ jobs:
         if: inputs.upload_artifact
         with:
           name: ${{ inputs.binary_name }}-linux-x86_64
-          path: target/release/${{ inputs.binary_name }}
+          path: ${{ inputs.working_directory }}/target/release/${{ inputs.binary_name }}
           if-no-files-found: error
           retention-days: ${{ inputs.artifact_retention_days }}
