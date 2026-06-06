@@ -182,3 +182,74 @@ jobs:
           path: ${{ inputs.working_directory }}/target/release/${{ inputs.binary_name }}
           if-no-files-found: error
           retention-days: ${{ inputs.artifact_retention_days }}
+
+  # Coverage 100% gate (opt-in, auto-detect)。working_directory に coverage_100.toml が
+  # あれば cargo llvm-cov --text を回し、登録ファイルの missed line == 0 を CI で強制する。
+  # toml が無ければ全 step skip して green (= 既存 caller への backward compat)。
+  # go-ci.yml の coverage_100.toml gate と同思想 (Rust は file 単位の --text line miss)。
+  coverage:
+    name: coverage 100
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    env:
+      # sccache は llvm-cov の計装ビルドと相性が悪いので coverage job では無効化。
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect coverage_100.toml
+        id: detect
+        run: |
+          if [ -f coverage_100.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "coverage_100.toml なし → coverage gate skip"
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.detect.outputs.present == 'true'
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        if: steps.detect.outputs.present == 'true'
+        with:
+          tool: cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+        if: steps.detect.outputs.present == 'true'
+        with:
+          shared-key: ${{ inputs.shared_key != '' && inputs.shared_key || github.event.repository.name }}-cov
+          workspaces: ${{ inputs.working_directory }}
+      - name: cargo llvm-cov + 100% gate
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          if ! cargo llvm-cov --text --no-fail-fast > cov.txt 2> cov.err; then
+            echo "::error::cargo llvm-cov failed"; tail -80 cov.err cov.txt; exit 1
+          fi
+          # 登録 path (working_directory からの相対) を取り出す。
+          mapfile -t PATHS < <(grep -E '^[[:space:]]*path[[:space:]]*=' coverage_100.toml \
+            | sed -E 's/.*"(.+)".*/\1/')
+          if [ "${#PATHS[@]}" -eq 0 ]; then
+            echo "coverage_100.toml に path 登録なし → skip"; exit 0
+          fi
+          # --text 出力からファイルごとの missed line 数 (exec count 0 の行) を集計。
+          awk '
+            /^\/.*\.rs:$/ { cur=$0; sub(/:$/,"",cur); seen[cur]=1; if (!(cur in miss)) miss[cur]=0; next }
+            cur!="" && /^[[:space:]]*[0-9]+\|[[:space:]]*0\|/ { miss[cur]++ }
+            END { for (f in seen) printf "%s %d\n", f, miss[f] }
+          ' cov.txt > miss.txt
+          fail=0
+          for p in "${PATHS[@]}"; do
+            line=$(awk -v p="$p" 'length($1) >= length(p) && substr($1, length($1)-length(p)+1) == p {print; exit}' miss.txt)
+            if [ -z "$line" ]; then
+              echo "::error::coverage_100: registered file not found in coverage output: $p"; fail=1; continue
+            fi
+            m=$(echo "$line" | awk '{print $2}')
+            if [ "$m" -gt 0 ]; then
+              echo "::error::coverage_100: $p has $m uncovered line(s) (must be 0)"; fail=1
+            else
+              echo "OK 100%: $p"
+            fi
+          done
+          exit $fail
