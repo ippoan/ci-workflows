@@ -106,6 +106,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # crates.io download の flaky 対策。Windows runner で `[16] Error in the HTTP2
+  # framing layer` による `download of … failed` が散発する (cdp-relay の Windows
+  # release で観測)。retry を増やし、HTTP/2 multiplexing を切って framing 起因の
+  # 一過性失敗を抑える (dtolnay/rust-toolchain も 1.70/1.71 で同 workaround を入れる)。
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
   # sccache: rustc 成果物を GHA backend (actions/cache) に保存。
   # tag push でも cache が効くように env と save-if を整備する。
   SCCACHE_GHA_ENABLED: "true"
