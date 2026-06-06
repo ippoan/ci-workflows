@@ -159,6 +159,10 @@ jobs:
           } >> .cargo/config.toml
 
       - name: cargo build --release
+        # Windows runner の default shell は pwsh。下の `if [ -n "$PKG" ]` 等は
+        # bash 構文なので shell を明示しないと pwsh が ParserError で落ちる
+        # (Missing '(' after 'if')。Git Bash は windows-latest に同梱。
+        shell: bash
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
