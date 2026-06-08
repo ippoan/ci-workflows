@@ -99,6 +99,15 @@ on:
       MCP_INTERNAL_SECRET:
         description: "Optional. Embedded into the release binary at build time via env. See github-mcp-server-rs#25."
         required: false
+      MINISIGN_SECRET_KEY:
+        description: |
+          Optional. minisign の無パスワード秘密鍵 (`minisign -G -W` で生成した .key
+          ファイルの中身、2 行)。渡すと release job が各 .zip / .tar.gz を minisign で
+          署名し `<asset>.minisig` を Release に添付する (supply-chain 強化)。
+          consumer は対応する公開鍵を hard-code して self-update 時に検証する。
+          初出: cdp-relay#20 (agent self-update の asset 署名検証)。
+          渡さない caller は署名 step が skip され従来どおり (= 後方互換)。
+        required: false
 
 permissions:
   contents: write
@@ -268,6 +277,11 @@ jobs:
     name: GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    # secret は job-level env に置き、`if: env.MINISIGN_SECRET_KEY != ''` で署名 step を
+    # 有無分岐する (step-level env は同 step の if から参照できないため job-level)。
+    # 渡されなければ空文字列 = 後方互換 (署名なし)。
+    env:
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -278,6 +292,30 @@ jobs:
 
       - name: List staged assets
         run: ls -la dist/
+
+      # 全 target の archive が dist/ に揃った ubuntu runner で一括 minisign 署名する
+      # (per-OS runner に minisign を入れるより単純)。MINISIGN_SECRET_KEY が無ければ skip。
+      # 署名対象は self-update が DL する .zip / .tar.gz 本体。鍵は無パスワード
+      # (`minisign -G -W`) 前提で stdin を </dev/null に閉じ非対話署名する。
+      - name: Sign archives with minisign
+        if: env.MINISIGN_SECRET_KEY != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          # 秘密鍵は file 経由でのみ minisign に渡し、終了時に shred する。
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+          shopt -s nullglob
+          signed=0
+          for f in dist/*.zip dist/*.tar.gz; do
+            minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$f" -x "$f.minisig" </dev/null
+            signed=$((signed + 1))
+          done
+          shred -u "$RUNNER_TEMP/minisign.key"
+          echo "signed $signed archive(s)"
+          ls -la dist/
 
       - name: Detect prerelease (tag contains -)
         id: detect
@@ -304,6 +342,8 @@ jobs:
             dist/*.tar.gz.sha256
             dist/*.zip
             dist/*.zip.sha256
+            dist/*.minisig
           # caller が linux のみ build した時に zip pattern が match しない
-          # ケースを許容 (build した分だけ attach されれば OK)。
+          # ケース、署名 step を skip して .minisig が無いケースを許容
+          # (build / 署名した分だけ attach されれば OK)。
           fail_on_unmatched_files: false
