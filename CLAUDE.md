@@ -149,6 +149,8 @@ jobs:
 | `npm_scope` | `''` | GitHub Packages スコープ |
 | `post_install_script` | `''` | install 後のスクリプト |
 | `deploy_staging_script` | `''` | staging デプロイスクリプト |
+| `staging_build_secret_name` | `''` | Deploy to staging に caller secret を 1 つ env として渡す opt-in (staging 専用、release には配線しない)。`staging_build_env_name` とペアで使う |
+| `staging_build_env_name` | `''` | 上記 secret を export する環境変数名 (`[A-Za-z_][A-Za-z0-9_]*`) |
 | `deploy_release_script` | `''` | リリースデプロイスクリプト |
 | `npm_publish_directory` | `''` | npm パッケージディレクトリ (設定時に publish 有効)。**comma-separated 対応** — `'packages/auth-client,packages/auth-client-worker'` のように複数 path 指定で全 package を 1 回の CI で publish。dev publish 版は全 package が `0.0.<PR>-dev.<SHA>` 共通、release tag publish は tag バージョン共通 (lock-step、独立 versioning 不可) |
 | `npm_publish_name` | `''` | npm パッケージ名 (propagation 用、例: `@ippoan/auth-client`) |
