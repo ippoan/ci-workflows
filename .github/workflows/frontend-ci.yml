@@ -51,6 +51,20 @@ on:
         description: 'Override staging deploy script (default: auto by project_type)'
         type: string
         default: ''
+      staging_build_secret_name:
+        description: |
+          Deploy to staging step に caller の secret を 1 つ環境変数として渡す
+          opt-in 口 (例: Nuxt build 時に runtimeConfig.public へ焼く
+          NUXT_PUBLIC_* 値)。caller 側の secret 名を指定し、
+          staging_build_env_name と必ずペアで使う。未指定なら従来どおり何も
+          渡さない。staging 専用 — deploy-release には意図的に配線しない
+          (本番ビルドへの staging key 混入防止)。Refs ippoan/rust-alc-api#391。
+        type: string
+        default: ''
+      staging_build_env_name:
+        description: 'staging_build_secret_name の値を export する環境変数名 ([A-Za-z_][A-Za-z0-9_]* のみ)'
+        type: string
+        default: ''
       deploy_release_script:
         description: 'Override release deploy script (default: auto by project_type)'
         type: string
@@ -1111,7 +1125,18 @@ jobs:
       - name: Deploy to staging
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # opt-in: caller secret を 1 つだけ build/deploy の env に渡す
+          # (式の短絡評価により name 未指定時は secrets を参照しない)
+          STAGING_BUILD_SECRET: ${{ inputs.staging_build_secret_name != '' && secrets[inputs.staging_build_secret_name] || '' }}
+          STAGING_BUILD_ENV_NAME: ${{ inputs.staging_build_env_name }}
         run: |
+          if [ -n "$STAGING_BUILD_ENV_NAME" ] && [ -n "$STAGING_BUILD_SECRET" ]; then
+            if ! printf '%s' "$STAGING_BUILD_ENV_NAME" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$'; then
+              echo "::error::staging_build_env_name must match ^[A-Za-z_][A-Za-z0-9_]*$"
+              exit 1
+            fi
+            export "$STAGING_BUILD_ENV_NAME=$STAGING_BUILD_SECRET"
+          fi
           CMD="${{ inputs.deploy_staging_script }}"
           if [ -z "$CMD" ]; then
             if [ "${{ inputs.project_type }}" = "worker" ]; then
