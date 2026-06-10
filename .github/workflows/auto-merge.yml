@@ -3,6 +3,27 @@ name: Auto Merge
 
 on:
   workflow_call:
+    inputs:
+      verify_deploy_gate:
+        description: |
+          caller workflow の deploy 系 job (job id / name に "deploy" を含む
+          job) が auto-merge job の `needs` で gate されているかを静的検査し、
+          漏れていれば loud fail する (default: true)。auto-merge が deploy
+          (staging cutover) の完了を待たずに merge → branch 削除すると走行中
+          の deploy が cancel され、失敗が無音化する事故の再発防止
+          (Refs ippoan/rust-alc-api#405)。
+        type: boolean
+        required: false
+        default: true
+      deploy_gate_ignore:
+        description: |
+          deploy gate 検査から除外する caller job id (comma 区切り)。
+          名前に "deploy" を含むが PR run で merge を gate すべきでない
+          job 用 (tag push 限定の deploy job は `if` の内容から自動除外
+          されるので通常は不要)。
+        type: string
+        required: false
+        default: ''
     secrets:
       CI_APP_ID:
         description: |
@@ -57,6 +78,89 @@ jobs:
       # env に置かず create-github-app-token の `with:` に直接渡す。
       CI_APP_ID: ${{ secrets.CI_APP_ID }}
     steps:
+      # ---- deploy gate 静的検査 (Refs ippoan/rust-alc-api#405) ----
+      # auto-merge job が deploy 系 job の完了を待たずに merge を queue すると、
+      # merge → branch 削除で走行中の staging cutover が cancel され、deploy
+      # 失敗が無音化する (rust-alc-api#391 で 2 回実害)。`needs:` は caller の
+      # DAG なので reusable 側から配線できないが、「配線漏れの検出」は caller
+      # workflow YAML の静的検査で中央化できる。jobs API と違い追加 permission
+      # (actions: read) が不要なので checkout + 静的解析で行う。
+      #
+      # 検査範囲は `github.workflow_ref` が指す top-level workflow file のみ:
+      #   - 直接 caller (auto-merge.yml を uses する job がある file): その job の
+      #     needs (推移的閉包) に deploy 系 job が全て含まれなければ loud fail
+      #   - nested 呼び出し (frontend-ci.yml / lib-ci.yml 経由 = top-level に
+      #     auto-merge.yml を uses する job が無い): embedded pipeline 側で
+      #     deploy-staging を needs 済みなので skip (top-level に deploy job が
+      #     あれば warning のみ — nested auto-merge の needs では gate 不能)
+      #   - 別 workflow file の deploy job は needs で gate しようがないので対象外
+      #     (branch protection required checks で守る)
+      - name: Checkout caller workflows (deploy gate check)
+        if: ${{ inputs.verify_deploy_gate }}
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/workflows
+
+      - name: Verify deploy jobs are gated by auto-merge needs (fail loud on missing wiring)
+        if: ${{ inputs.verify_deploy_gate }}
+        env:
+          WF_REF: ${{ github.workflow_ref }}
+          DEPLOY_GATE_IGNORE: ${{ inputs.deploy_gate_ignore }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          import yaml
+
+          ignore = {s.strip() for s in os.environ.get("DEPLOY_GATE_IGNORE", "").split(",") if s.strip()}
+          # workflow_ref 例: owner/repo/.github/workflows/ci.yml@refs/pull/408/merge
+          path = os.environ["WF_REF"].split("@", 1)[0].split("/", 2)[2]
+          with open(path) as f:
+              wf = yaml.safe_load(f)
+          jobs = {jid: j for jid, j in (wf.get("jobs") or {}).items() if isinstance(j, dict)}
+
+          def is_pr_deploy(jid, job):
+              if jid in ignore:
+                  return False
+              if not re.search(r"deploy", jid + " " + str(job.get("name") or ""), re.I):
+                  return False
+              cond = str(job.get("if") or "")
+              # tag push 限定 (PR run では走らない) の deploy job は merge と
+              # 並走しないので gate 対象外
+              if "refs/tags" in cond and "pull_request" not in cond:
+                  return False
+              return True
+
+          deploy_jobs = {jid for jid, j in jobs.items() if is_pr_deploy(jid, j)}
+          callers = {jid: j for jid, j in jobs.items() if "auto-merge.yml" in str(j.get("uses") or "")}
+
+          if not callers:
+              if deploy_jobs:
+                  print(f"::warning title=auto-merge deploy gate::top-level の deploy 系 job {sorted(deploy_jobs)} は nested auto-merge の needs では gate できません。branch protection required checks での gate を検討してください。")
+              sys.exit(0)
+
+          def closure(jid, seen):
+              needs = jobs.get(jid, {}).get("needs") or []
+              if isinstance(needs, str):
+                  needs = [needs]
+              for dep in needs:
+                  if dep not in seen:
+                      seen.add(dep)
+                      closure(dep, seen)
+
+          ok = True
+          for jid in callers:
+              seen = set()
+              closure(jid, seen)
+              missing = deploy_jobs - seen
+              if missing:
+                  ok = False
+                  mi = ",".join(sorted(missing))
+                  print(f"::error title=auto-merge deploy gate::{path} の job '{jid}' の needs に deploy 系 job {sorted(missing)} が (推移的にも) 含まれていません。merge -> branch 削除で走行中の deploy が cancel され、deploy 失敗が無音化します (ippoan/rust-alc-api#405)。needs に追加するか、PR run で merge を gate すべきでない job なら input deploy_gate_ignore: '{mi}' で除外してください。")
+          if not ok:
+              sys.exit(1)
+          print(f"deploy gate OK: deploy jobs {sorted(deploy_jobs)} <= needs closure of {sorted(callers)}")
+          PY
+
       # GitHub App installation token を mint (caller が CI_APP_ID/KEY を渡した時)。
       # CI_APP_ID が空 (= caller が secret を配線していない) なら skip され、
       # 次の guard step で fail-loud する。

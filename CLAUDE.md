@@ -285,6 +285,35 @@ jobs:
 
 `NODE_AUTH_TOKEN` は同 org 内 publish なら `${{ secrets.GITHUB_TOKEN }}` で足りる。 npmjs.org publish に切り替える場合は granular npm access token を caller secret として渡す + `registry_url: 'https://registry.npmjs.org'` も合わせて override。
 
+### auto-merge.yml
+
+CI 完走後に `gh pr merge --auto --squash` を queue する reusable。frontend-ci.yml / lib-ci.yml には embed 済み、go-ci.yml caller や bespoke ci.yml の repo は caller 側で `needs:` を組んで呼ぶ。
+
+#### caller-composed の鉄則: deploy 系 job を `needs` に含める
+
+auto-merge job が deploy (staging cutover) の完了を待たずに merge を queue すると、merge → branch 削除で**走行中の deploy が cancel され、deploy 失敗が無音化する** (ippoan/rust-alc-api#391 で 2 回実害、同#405)。caller 側で auto-merge.yml を直接呼ぶ場合は deploy 系 job を必ず `needs` に含める:
+
+```yaml
+auto-merge:
+  needs: [ci, build-image, deploy-staging]
+  if: >-
+    always() && github.event_name == 'pull_request' &&
+    needs.ci.result == 'success' &&
+    (needs.deploy-staging.result == 'success' || needs.deploy-staging.result == 'skipped')
+  uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
+  secrets: inherit
+```
+
+#### deploy gate 静的検査 (配線漏れの loud fail)
+
+`needs:` は caller の DAG なので reusable 側から配線はできないが、**配線漏れの検出は auto-merge.yml に内蔵されている** (`verify_deploy_gate` input, default `true`)。job 実行時に caller workflow YAML を checkout して静的検査し、job id / name に `deploy` を含む job が auto-merge job の needs (推移的閉包) に含まれていなければ `::error` + fail する。
+
+- **tag push 限定の deploy job は自動除外** (`if` に `refs/tags` を含み `pull_request` を含まない job は PR run で走らず merge と並走しないため)
+- 誤検知する job は `deploy_gate_ignore: 'job-id1,job-id2'` (comma 区切り) で除外
+- **nested 呼び出し (frontend-ci.yml / lib-ci.yml 経由) は検査 skip** — embedded pipeline 側で `deploy-staging` を needs 済み。top-level に独自 deploy job がある場合は warning のみ (needs では gate 不能 → branch protection required checks で守る)
+- 別 workflow file の deploy job は対象外 (needs で gate しようがない)
+- `verify_deploy_gate: false` で検査ごと無効化可
+
 
 ### Secret verify を frontend-ci.yml / go-ci.yml の中に取り込む経緯
 
