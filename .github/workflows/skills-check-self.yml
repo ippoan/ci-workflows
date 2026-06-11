@@ -1,0 +1,17 @@
+name: skills-check-self
+
+# ci-workflows-map skill が .github/workflows/ の変化に追従しているか検査する
+# 自己呼び出し (claude-skills#59 Wave 3)。enforce=warn。dependency-check は無効。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  skills-check:
+    uses: ippoan/ci-workflows/.github/workflows/skills-check.yml@main
+    with:
+      dependency_check: 'false'
