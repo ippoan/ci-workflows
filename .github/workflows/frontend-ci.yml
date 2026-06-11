@@ -226,6 +226,17 @@ on:
           compatibility report に使う。org-level secret を caller の
           `secrets: inherit` 経由で受け取る (無ければ report job は no-op)。
         required: false
+      CI_APP_ID:
+        description: >-
+          GitHub App ID。内蔵 auto-merge job (nested auto-merge.yml) が
+          installation token を mint するのに使う。同 org (ippoan) caller は
+          `secrets: inherit` で org secret が届くため宣言不要だが、
+          **cross-org caller (ohishi-exp 等) は inherit が効かない**ため、
+          ここで宣言して明示渡しを可能にする (Refs #125)。
+        required: false
+      CI_APP_PRIVATE_KEY:
+        description: GitHub App private key (CI_APP_ID とペア。Refs #125)
+        required: false
 
 jobs:
   # PR auto-merge を CI 開始時に強制 disable する defense-in-depth step。
