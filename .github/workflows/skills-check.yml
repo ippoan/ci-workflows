@@ -337,3 +337,65 @@ jobs:
               print(f"::error::deprecated 依存の新規追加 {len(deprecated)} 件 (enforce=fail)")
               sys.exit(1)
           PY
+
+  # ------------------------------------------------------------------ guard
+  # frontend-ci.yml / go-ci.yml は内蔵 secret-verify job が parse 時に
+  # `id-token: write` を要求する。caller がこれを未宣言だと **無音の
+  # startup_failure** になり、job も check も出ないまま PR が必須 check 未充足で
+  # 詰まる (= 最も厄介な silent trap)。startup_failure 自体は job 起動前なので
+  # 当該 workflow 内では捕捉できないが、本 skills-check は id-token 不要で別 run
+  # として必ず走るため、ここで caller の workflow を静的検査して **loud-fail** する。
+  caller-perms-check:
+    name: caller-perms-check
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify frontend-ci / go-ci callers declare id-token write
+        run: |
+          python3 - <<'PY'
+          import glob, os, re, sys
+
+          # これらの reusable は内蔵 secret-verify が id-token: write を parse 時要求する
+          REQUIRES_IDTOKEN = ("frontend-ci.yml", "go-ci.yml")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          findings = []
+          files = sorted(glob.glob(".github/workflows/*.yml") +
+                         glob.glob(".github/workflows/*.yaml"))
+          for f in files:
+              with open(f, encoding="utf-8") as fh:
+                  text = fh.read()
+              uses = any(re.search(
+                  r"uses:\s*ippoan/ci-workflows/\.github/workflows/" + re.escape(w),
+                  text) for w in REQUIRES_IDTOKEN)
+              if not uses:
+                  continue
+              if re.search(r"^\s*id-token:\s*write\s*$", text, re.M):
+                  continue
+              findings.append(f)
+
+          for f in findings:
+              print(f"::error file={f}::{f}: frontend-ci/go-ci を呼んでいますが "
+                    f"permissions に id-token: write がありません。内蔵 secret-verify が "
+                    f"parse 時に要求するため、未宣言だと **無音の startup_failure** になり "
+                    f"PR が必須 check 未充足で詰まります。top-level か jobs.<id> の "
+                    f"permissions に `id-token: write` を追加してください。")
+
+          report = "## skills-check (caller-perms-check)\n\n"
+          if findings:
+              report += "\n".join(
+                  f"- ❌ `{f}`: missing `id-token: write` (frontend-ci/go-ci caller)"
+                  for f in findings) + "\n\n`permissions:` に `id-token: write` を追加してください。\n"
+          else:
+              report += "- ✅ frontend-ci/go-ci caller の id-token: write 宣言 OK (or 該当なし)。\n"
+          print(report)
+          if summary:
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.write(report)
+
+          if findings:
+              sys.exit(1)
+          PY
