@@ -185,8 +185,16 @@ jobs:
       # 解消できる。Refs #65
       - name: Require App token (fail loud if caller did not pass CI_APP_ID/CI_APP_PRIVATE_KEY)
         if: steps.app-token.outputs.token == ''
+        env:
+          CALLER_OWNER: ${{ github.repository_owner }}
         run: |
-          echo "::error title=auto-merge: missing GitHub App credentials::Caller did not provide CI_APP_ID / CI_APP_PRIVATE_KEY, so no GitHub App installation token could be minted. Pass them via 'secrets: inherit' (or explicit 'secrets:' with CI_APP_ID and CI_APP_PRIVATE_KEY). The github.token fallback was removed because it caused intermittent 'API rate limit already exceeded' failures and a github-actions[bot] push actor that does not trigger downstream release workflows. See ippoan/ci-workflows#65."
+          echo "::error title=auto-merge: missing GitHub App credentials::CI_APP_ID / CI_APP_PRIVATE_KEY were empty, so no GitHub App installation token could be minted."
+          echo "::error::FIX: the caller must wire CI_APP_ID + CI_APP_PRIVATE_KEY through to this reusable."
+          echo "::error::CROSS-ORG GOTCHA: 'secrets: inherit' ONLY forwards secrets when the reusable workflow is in the SAME org/enterprise as the caller. This reusable lives in 'ippoan/ci-workflows', so a caller in a DIFFERENT org (your caller owner is '${CALLER_OWNER}') will get EMPTY secrets with 'secrets: inherit'. Cross-org callers MUST pass them explicitly instead:"
+          echo "::error::    secrets:"
+          echo "::error::      CI_APP_ID: \${{ secrets.CI_APP_ID }}"
+          echo "::error::      CI_APP_PRIVATE_KEY: \${{ secrets.CI_APP_PRIVATE_KEY }}"
+          echo "::error::Also confirm both are present as org (or repo) secrets in '${CALLER_OWNER}' and visible to this repository. The github.token fallback was removed because it caused intermittent 'API rate limit already exceeded' failures and a github-actions[bot] push actor that does not trigger downstream release workflows. See ippoan/ci-workflows#65."
           exit 1
 
       - name: Check mergeable and queue squash merge
