@@ -237,6 +237,13 @@ on:
       CI_APP_PRIVATE_KEY:
         description: GitHub App private key (CI_APP_ID とペア。Refs #125)
         required: false
+      TAG_RELEASE_PAT:
+        description: >-
+          workflow file (.github/workflows/**) を触る PR の merge に必要な PAT。
+          内蔵 auto-merge job が nested auto-merge.yml に明示転送する (Refs #125。
+          同 org caller は inherit で org secret が乗るため宣言不要、cross-org
+          caller は明示渡しで透過できる)。
+        required: false
 
 jobs:
   # PR auto-merge を CI 開始時に強制 disable する defense-in-depth step。
@@ -1557,10 +1564,15 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    # `secrets: inherit` is required so the nested auto-merge.yml sees the
-    # org-level `TAG_RELEASE_PAT` (which carries the `workflow` scope needed
-    # to merge PRs touching `.github/workflows/**`). Without inherit the
-    # nested call falls back to `github.token`, which lacks `workflow` scope
-    # and returns HTTP 401 "Bad credentials" from the merge mutation while
-    # leaving `gh pr view` working — see ippoan/mcp-cf-workers#3.
-    secrets: inherit
+    # NOTE(#125): ここは以前 `secrets: inherit` だったが、inherit の org 境界
+    # 判定は **workflow run の repo org 基準** のため、cross-org caller
+    # (ohishi-exp) の run では caller が明示渡しした secret すら nested に
+    # 届かなかった (caller context では present、nested env では空、を probe で
+    # 実証)。宣言済み secret を明示転送する。ippoan caller (hop1 inherit) でも
+    # frontend/lib-ci の secrets context に org secret が乗るため同じ式で解決する。
+    # TAG_RELEASE_PAT は workflow file を触る PR の merge に必要 (auto-merge.yml
+    # の宣言参照)。
+    secrets:
+      CI_APP_ID: ${{ secrets.CI_APP_ID }}
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      TAG_RELEASE_PAT: ${{ secrets.TAG_RELEASE_PAT }}
