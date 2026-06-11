@@ -7,12 +7,21 @@ name: Skills Check
 # PR 上で機械的に warn/fail させるのが本 workflow (Refs ippoan/claude-skills#58 /
 # ippoan/claude-hooks#18 / ci-workflows#118)。
 #
-# Job: map-check
+# Job 1: map-check
 #   対象 repo の `.claude/skills/*/SKILL.md` のうち frontmatter に
 #   `generated-from: <repo>:<commit-sha>` + `paths: [src/, proto/]` を持つ map を
 #   読み、PR の変更ファイルと paths を突き合わせる。**paths 下に変更があるのに
 #   その map (SKILL.md) が同 PR で更新されていない** 場合に warn (= map 更新漏れ)。
 #   map が 1 つも無い repo は「uncovered」を 1 行通知するだけ (fail しない)。
+#
+# Job 2: dependency-check (dependency_check=true、default)
+#   PR で Cargo.toml / package.json に **新規追加された依存** を、standards_repo
+#   (default ippoan/claude-skills) の `knowledge/standards/libs/` を sparse checkout
+#   して突き合わせる。
+#   - 未掲載 → warn (deny しない。実験は止めず、未掲載のまま定着することだけ防ぐ)
+#   - deprecated 掲載の依存を新規追加 → ::error、enforce=fail なら job fail
+#   base/head の manifest を JSON/TOML として parse し依存 set の差分を取るので、
+#   scripts 変更等の false-positive は出ない (Python stdlib: json + tomllib)。
 #
 # enforce:
 #   - warn (default): ::warning:: + Step Summary のみ。CI は緑のまま。
@@ -50,6 +59,21 @@ on:
         required: false
         type: string
         default: .claude/skills
+      dependency_check:
+        description: 'true (default) | false。PR で新規追加された依存を knowledge/standards/libs と突き合わせる'
+        required: false
+        type: string
+        default: 'true'
+      standards_repo:
+        description: 'standards カタログを持つ repo (owner/name)'
+        required: false
+        type: string
+        default: ippoan/claude-skills
+      standards_ref:
+        description: 'standards_repo の ref'
+        required: false
+        type: string
+        default: main
 
 jobs:
   map-check:
@@ -165,5 +189,151 @@ jobs:
 
           if findings and enforce == "fail":
               print(f"::error::map 更新漏れ {len(findings)} 件 (enforce=fail)")
+              sys.exit(1)
+          PY
+
+  dependency-check:
+    name: dependency-check
+    if: ${{ inputs.dependency_check == 'true' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout standards catalog (sparse)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.standards_repo }}
+          ref: ${{ inputs.standards_ref }}
+          path: .skills-standards
+          sparse-checkout: knowledge/standards/libs
+          sparse-checkout-cone-mode: false
+
+      - name: Check new deps against standards/libs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          ENFORCE: ${{ inputs.enforce }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, glob, subprocess, sys
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              tomllib = None
+
+          base = os.environ["BASE_SHA"]
+          enforce = os.environ.get("ENFORCE", "warn").strip().lower()
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          std_dir = ".skills-standards/knowledge/standards/libs"
+
+          def git_show(ref, path):
+              r = subprocess.run(["git", "show", f"{ref}:{path}"],
+                                 capture_output=True, text=True)
+              return r.stdout if r.returncode == 0 else None  # None = ref に存在せず
+
+          def changed_files():
+              r = subprocess.run(["git", "diff", "--name-only", f"{base}...HEAD"],
+                                 capture_output=True, text=True)
+              if r.returncode != 0:
+                  r = subprocess.run(["git", "diff", "--name-only", base, "HEAD"],
+                                     capture_output=True, text=True)
+              return [l.strip() for l in r.stdout.splitlines() if l.strip()]
+
+          def pkg_deps(text):
+              if not text:
+                  return set()
+              try:
+                  d = json.loads(text)
+              except Exception:
+                  return set()
+              keys = set()
+              for s in ("dependencies", "devDependencies",
+                        "peerDependencies", "optionalDependencies"):
+                  keys |= set((d.get(s) or {}).keys())
+              return keys
+
+          def cargo_deps(text):
+              if not text:
+                  return set()
+              keys = set()
+              if tomllib:
+                  try:
+                      d = tomllib.loads(text)
+                      for s in ("dependencies", "dev-dependencies", "build-dependencies"):
+                          keys |= set((d.get(s) or {}).keys())
+                      keys |= set(((d.get("workspace") or {}).get("dependencies") or {}).keys())
+                      return keys
+                  except Exception:
+                      pass
+              cur = None  # fallback line parser
+              for ln in text.splitlines():
+                  s = ln.strip()
+                  mh = re.match(r"^\[(.+)\]$", s)
+                  if mh:
+                      cur = mh.group(1)
+                      continue
+                  tbl = cur.split(".")[-1] if cur else ""
+                  if tbl in ("dependencies", "dev-dependencies", "build-dependencies"):
+                      md = re.match(r"^([A-Za-z0-9_-]+)\s*=", s)
+                      if md:
+                          keys.add(md.group(1))
+              return keys
+
+          # standards/libs を読む。掲載判定は token 境界つき substring。
+          std_text = ""
+          deprecated_text = ""
+          for f in sorted(glob.glob(std_dir + "/*.md")):
+              with open(f, encoding="utf-8") as fh:
+                  t = fh.read()
+              std_text += "\n" + t
+              if re.search(r"^status:\s*deprecated\s*$", t, re.M):
+                  deprecated_text += "\n" + t
+
+          def mentioned(dep, hay):
+              return re.search(r"(^|[^\w@./-])" + re.escape(dep) + r"($|[^\w./-])", hay) is not None
+
+          unlisted = []     # (manifest, dep) — warn のみ (deny しない)
+          deprecated = []   # (manifest, dep) — enforce=fail で fail 可
+          for path in changed_files():
+              name = os.path.basename(path)
+              if name == "package.json":
+                  new = pkg_deps(git_show("HEAD", path)) - pkg_deps(git_show(base, path))
+              elif name == "Cargo.toml":
+                  new = cargo_deps(git_show("HEAD", path)) - cargo_deps(git_show(base, path))
+              else:
+                  continue
+              for dep in sorted(new):
+                  if mentioned(dep, std_text):
+                      if deprecated_text and mentioned(dep, deprecated_text):
+                          deprecated.append((path, dep))
+                  else:
+                      unlisted.append((path, dep))
+
+          lines = []
+          for path, dep in unlisted:
+              msg = (f"{path}: 新規依存 `{dep}` は knowledge/standards/libs に未掲載です。"
+                     f"既存 canonical があれば置換、無ければ standards に追記するか decision を書いてください。")
+              print(f"::warning file={path}::{msg}")
+              lines.append(f"⚠️ {msg}")
+          for path, dep in deprecated:
+              msg = (f"{path}: 新規依存 `{dep}` は standards/libs で deprecated 掲載です。"
+                     f"推奨 canonical へ寄せてください。")
+              print(f"::error file={path}::{msg}")
+              lines.append(f"⛔ {msg}")
+          if not lines:
+              lines.append("✅ 新規依存なし or 全て standards/libs に掲載済み。")
+
+          report = "## skills-check (dependency-check)\n\n" + "\n".join(f"- {l}" for l in lines) + "\n"
+          print(report)
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as fh:
+                  fh.write(report)
+
+          # 未掲載は deny しない (実験を止めない)。deprecated だけ enforce=fail で fail。
+          if deprecated and enforce == "fail":
+              print(f"::error::deprecated 依存の新規追加 {len(deprecated)} 件 (enforce=fail)")
               sys.exit(1)
           PY
