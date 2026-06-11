@@ -373,7 +373,8 @@ jobs:
                   text) for w in REQUIRES_IDTOKEN)
               if not uses:
                   continue
-              if re.search(r"^\s*id-token:\s*write\s*$", text, re.M):
+              # 行末コメントや前後空白を許容 (declaration の有無だけ見る)
+              if re.search(r"id-token:\s*write", text):
                   continue
               findings.append(f)
 
