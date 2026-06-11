@@ -304,6 +304,29 @@ auto-merge:
   secrets: inherit
 ```
 
+#### クロス org caller は `secrets: inherit` 不可 (明示渡し必須)
+
+**`secrets: inherit` は reusable が caller と同一 org / enterprise にある時しか
+secret を渡さない。** この reusable は `ippoan/ci-workflows` にあるので、
+**別 org の caller (例: `ohishi-exp/*`) が `secrets: inherit` を使うと
+`CI_APP_ID` / `CI_APP_PRIVATE_KEY` が空になり** `missing GitHub App
+credentials` で fail する (= 何度も踏んだ罠。`Require App token` step の
+`::error` にも明記済み)。クロス org caller は named secret を明示的に渡す:
+
+```yaml
+auto-merge:
+  uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
+  secrets:
+    CI_APP_ID: ${{ secrets.CI_APP_ID }}
+    CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
+```
+
+同 org (ippoan) の caller は従来どおり `secrets: inherit` で良い。CI_APP_*
+は caller org に org (or repo) secret として存在し、当該 repo に visible で
+ある必要がある (= App を org に install + `Organization permissions →
+Secrets: Read and write`、secret は `secrets-inventory` MCP の `sync_from_gcp`
+`gh_org` で GCP から投入できる。Refs ippoan/secrets-inventory-gcp#51)。
+
 #### deploy gate 静的検査 (配線漏れの loud fail)
 
 `needs:` は caller の DAG なので reusable 側から配線はできないが、**配線漏れの検出は auto-merge.yml に内蔵されている** (`verify_deploy_gate` input, default `true`)。job 実行時に caller workflow YAML を checkout して静的検査し、job id / name に `deploy` を含む job が auto-merge job の needs (推移的閉包) に含まれていなければ `::error` + fail する。
