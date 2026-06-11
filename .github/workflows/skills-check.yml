@@ -1,0 +1,169 @@
+name: Skills Check
+
+# Reusable: <repo>-map skill が code に追従しているかを PR diff で検査する。
+#
+# 従来 claude-hooks の session-start-skill-coverage.sh (SessionStart 警告) が
+# 担っていた stale 判定は CCoW に無視され機能していなかった。判定を CI に移し、
+# PR 上で機械的に warn/fail させるのが本 workflow (Refs ippoan/claude-skills#58 /
+# ippoan/claude-hooks#18 / ci-workflows#118)。
+#
+# Job: map-check
+#   対象 repo の `.claude/skills/*/SKILL.md` のうち frontmatter に
+#   `generated-from: <repo>:<commit-sha>` + `paths: [src/, proto/]` を持つ map を
+#   読み、PR の変更ファイルと paths を突き合わせる。**paths 下に変更があるのに
+#   その map (SKILL.md) が同 PR で更新されていない** 場合に warn (= map 更新漏れ)。
+#   map が 1 つも無い repo は「uncovered」を 1 行通知するだけ (fail しない)。
+#
+# enforce:
+#   - warn (default): ::warning:: + Step Summary のみ。CI は緑のまま。
+#   - fail: 更新漏れがあれば job を fail させる (pilot 用、PR3 で導入予定)。
+#
+# 旧形式 (generated-from が tree-sha / paths 無し) は移行期間中スキップする
+# (claude-hooks#18 Q1)。横断 map (複数 repo を space 区切り) も paths が無いので
+# 対象外。
+#
+# Caller 例 (consumer repo の .github/workflows/skills-check.yml):
+#
+#   name: skills-check
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened]
+#   permissions:
+#     contents: read
+#   jobs:
+#     skills-check:
+#       uses: ippoan/ci-workflows/.github/workflows/skills-check.yml@main
+#       # with:
+#       #   enforce: warn        # warn (default) | fail
+#       #   skills_dir: .claude/skills
+
+on:
+  workflow_call:
+    inputs:
+      enforce:
+        description: 'warn (default, 通知のみ) | fail (更新漏れで job fail)'
+        required: false
+        type: string
+        default: warn
+      skills_dir:
+        description: 'map skill を探すディレクトリ (caller repo 相対)'
+        required: false
+        type: string
+        default: .claude/skills
+
+jobs:
+  map-check:
+    name: map-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect changed files (PR)
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "not a pull_request event ($EVENT_NAME) — map-check は PR でのみ意味を持つ"
+            : > changed_files.txt
+          else
+            git diff --name-only "$BASE_SHA"...HEAD > changed_files.txt || \
+              git diff --name-only "$BASE_SHA" HEAD > changed_files.txt
+          fi
+          echo "changed $(wc -l < changed_files.txt) file(s)"
+
+      - name: Check map freshness
+        env:
+          SKILLS_DIR: ${{ inputs.skills_dir }}
+          ENFORCE: ${{ inputs.enforce }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys
+
+          skills_dir = os.environ.get("SKILLS_DIR", ".claude/skills")
+          enforce = os.environ.get("ENFORCE", "warn").strip().lower()
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          with open("changed_files.txt", encoding="utf-8") as fh:
+              changed = [ln.strip() for ln in fh if ln.strip()]
+
+          def parse_frontmatter(text):
+              lines = text.split("\n")
+              if not lines or lines[0].strip() != "---":
+                  return {}
+              fm = {}
+              for ln in lines[1:]:
+                  if ln.strip() == "---":
+                      break
+                  m = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):\s?(.*)$", ln)
+                  if m:
+                      fm[m.group(1)] = m.group(2).rstrip()
+              return fm
+
+          def parse_list(v):
+              v = (v or "").strip()
+              if v.startswith("[") and v.endswith("]"):
+                  v = v[1:-1]
+              return [t.strip().strip('"\'') for t in v.split(",") if t.strip()]
+
+          def under(path, prefix):
+              p = prefix.rstrip("/")
+              return path == p or path.startswith(p + "/")
+
+          # map skill を集める (generated-from + paths を持つもの)
+          maps = []
+          if os.path.isdir(skills_dir):
+              for entry in sorted(os.listdir(skills_dir)):
+                  skill_md = os.path.join(skills_dir, entry, "SKILL.md")
+                  if not os.path.isfile(skill_md):
+                      continue
+                  with open(skill_md, encoding="utf-8") as fh:
+                      fm = parse_frontmatter(fh.read())
+                  if "generated-from" not in fm:
+                      continue
+                  paths = parse_list(fm.get("paths", ""))
+                  maps.append((skill_md, fm, paths))
+
+          lines = []
+          findings = []
+
+          if not maps:
+              lines.append(f"ℹ️ uncovered: `{skills_dir}` に generated-from を持つ "
+                           f"`<repo>-map` skill がありません (`repo-map` skill で作成可)。")
+          else:
+              for skill_md, fm, paths in maps:
+                  gen = fm.get("generated-from", "")
+                  # 旧形式 (paths 無し / tree-sha のみ / 複数 repo の横断 map) は skip
+                  if not paths:
+                      lines.append(f"⏭️ `{skill_md}`: paths 未設定 (旧形式) — "
+                                   f"移行期間中のため判定スキップ。`repo-map` で新形式へ。")
+                      continue
+                  touched = [c for c in changed if any(under(c, p) for p in paths)]
+                  map_updated = skill_md in changed
+                  if touched and not map_updated:
+                      findings.append((skill_md, paths, touched))
+                      sample = ", ".join(touched[:5]) + (" …" if len(touched) > 5 else "")
+                      msg = (f"{skill_md}: paths {paths} に変更があるのに map が同 PR で "
+                             f"更新されていません ({len(touched)} file: {sample})。"
+                             f"`repo-map` skill で再生成し generated-from の commit-sha を更新してください。")
+                      print(f"::warning file={skill_md}::{msg}")
+                      lines.append(f"⚠️ {msg}")
+                  else:
+                      lines.append(f"✅ `{skill_md}`: paths {paths} — 更新漏れなし。")
+
+          report = "## skills-check (map-check)\n\n" + "\n".join(f"- {l}" for l in lines) + "\n"
+          print(report)
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as fh:
+                  fh.write(report)
+
+          if findings and enforce == "fail":
+              print(f"::error::map 更新漏れ {len(findings)} 件 (enforce=fail)")
+              sys.exit(1)
+          PY
