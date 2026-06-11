@@ -461,7 +461,16 @@ jobs:
     #   skills_dir: .claude/skills
 ```
 
-> PR2 で `dependency-check` job (新規依存 vs `knowledge/standards/libs/` 突き合わせ) を追加予定。
+#### Job 2: dependency-check (dependency_check=true、default)
+
+PR で `Cargo.toml` / `package.json` に**新規追加された依存**を、`standards_repo`（default `ippoan/claude-skills`）の `knowledge/standards/libs/` を sparse checkout して突き合わせる。
+
+- **未掲載** → warn（deny しない。実験は止めず、未掲載のまま定着することだけ防ぐ）
+- **deprecated 掲載**の依存を新規追加 → `::error`、`enforce=fail` なら job fail
+
+base/head の manifest を JSON / TOML として parse し依存 set の差分を取るため、`scripts` 変更等の false-positive は出ない（Python stdlib: `json` + `tomllib`）。`dependency_check: false` で無効化、`standards_repo` / `standards_ref` で参照先を変更可。
+
+> dependency-check は `pull_request` event でのみ走る（base sha が要るため）。standards_repo が private な場合は caller の checkout token に read 権限が要る（public なら不要）。
 
 ## よくあるトラブル
 
