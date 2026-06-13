@@ -23,6 +23,16 @@ inputs:
   repo:
     description: '"owner/name"'
     required: true
+  cf_worker_name:
+    description: >-
+      Worker 名。checkout root に wrangler config が無い caller
+      (e.g. release-wave-handler は repo root を checkout、alc-app の config は
+      web/wrangler.jsonc) では必須 — 無いと `wrangler deployments list` が
+      "You need to provide a name of your worker" で失敗し traffic-report が
+      skip される。config が root にある caller (frontend-ci の deploy job 等)
+      では空で良い (wrangler が config から名前を解決)。
+    required: false
+    default: ""
   uploaded_version_id:
     description: tag を紐付ける version id (flip/rollback 対象)。省略可。
     required: false
@@ -43,6 +53,7 @@ runs:
         CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
         RELEASE_WAVE_WEBHOOK_SECRET: ${{ inputs.webhook_secret }}
         REPO: ${{ inputs.repo }}
+        CF_WORKER_NAME: ${{ inputs.cf_worker_name }}
         UPLOADED_VID: ${{ inputs.uploaded_version_id }}
         TAG: ${{ inputs.tag }}
       run: |
@@ -57,11 +68,20 @@ runs:
           exit 0
         fi
 
+        # checkout root に wrangler config が無い caller (release-wave-handler は
+        # repo root を checkout) では worker 名を解決できず list が失敗するため、
+        # cf_worker_name があれば `--name` を渡す。root に config がある caller
+        # (frontend-ci の deploy job) では空 → config から解決。
+        NAME_ARG=()
+        if [ -n "${CF_WORKER_NAME:-}" ]; then
+          NAME_ARG=(--name "$CF_WORKER_NAME")
+        fi
+
         # stdout から最初の JSON 配列だけを取り出す (wrangler/npm の warning 行除去)。
         strip_json() { sed -n '/^[[:space:]]*\[/,$p'; }
 
         # 1) deployments list → active deployment の version_id → percentage。
-        D_RAW=$(npx --yes wrangler deployments list --json 2>/dev/null) || {
+        D_RAW=$(npx --yes wrangler deployments list "${NAME_ARG[@]}" --json 2>/dev/null) || {
           echo "::warning::wrangler deployments list failed; traffic-report skip"; exit 0; }
         DEPLOYMENTS=$(printf '%s' "$D_RAW" | strip_json)
         if [ -z "$DEPLOYMENTS" ]; then
@@ -75,7 +95,7 @@ runs:
         ') || { echo "::warning::deployments list parse 失敗; skip"; exit 0; }
 
         # 2) versions list → 直近 version 群 (id + created_on)。
-        V_RAW=$(npx --yes wrangler versions list --json 2>/dev/null) || {
+        V_RAW=$(npx --yes wrangler versions list "${NAME_ARG[@]}" --json 2>/dev/null) || {
           echo "::warning::wrangler versions list failed; traffic-report skip"; exit 0; }
         VERSIONS=$(printf '%s' "$V_RAW" | strip_json)
         if [ -z "$VERSIONS" ]; then
