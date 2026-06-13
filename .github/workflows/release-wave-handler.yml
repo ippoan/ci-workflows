@@ -316,6 +316,11 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ needs.dispatch.outputs.cf_account_id }}
+          # worker 名を明示。checkout した repo root には wrangler config が無い
+          # ことが多い (e.g. alc-app は web/wrangler.jsonc) ため、`--name` を渡さ
+          # ないと "You need to provide a name of your worker" で fail する。
+          # cf_worker_name は targets.yaml の必須 field。Refs ippoan/ci-dashboard#196。
+          CF_WORKER_NAME: ${{ needs.dispatch.outputs.cf_worker_name }}
           PREVIEWED_VERSION_ID: ${{ github.event.client_payload.previewed_version_id }}
         run: |
           set -euo pipefail
@@ -326,12 +331,12 @@ jobs:
               exit 1
             fi
             echo "flipping 100% traffic to previewed version $VID"
-            npx wrangler versions deploy "${VID}@100%" --yes
+            npx wrangler versions deploy "${VID}@100%" --name "$CF_WORKER_NAME" --yes
           else
             # 後方互換: previewed_version_id 不在 (旧 dispatcher / 単独 release) は
             # 従来どおり現コードを deploy して flip する。
             echo "::warning::no previewed_version_id in payload; falling back to 'wrangler deploy'"
-            npx wrangler deploy
+            npx wrangler deploy --name "$CF_WORKER_NAME"
           fi
 
       # flip 後の version traffic split を ci-dashboard に報告し、Traffic 表示を
@@ -448,18 +453,21 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ needs.dispatch.outputs.cf_account_id }}
+          # worker 名を明示 (checkout root に wrangler config が無い repo 対策)。
+          # Refs ippoan/ci-dashboard#196。
+          CF_WORKER_NAME: ${{ needs.dispatch.outputs.cf_worker_name }}
           FLIP_FROM_REVISION: ${{ github.event.client_payload.flip_from_revision }}
         run: |
           set -euo pipefail
           VID="${FLIP_FROM_REVISION:-}"
           if [[ -n "$VID" ]] && [[ "$VID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
             echo "rolling back: deploy previous version $VID @100%"
-            npx wrangler versions deploy "${VID}@100%" --yes
+            npx wrangler versions deploy "${VID}@100%" --name "$CF_WORKER_NAME" --yes
           else
             # flip_from_revision が無い / 形式不一致なら wrangler 既定の rollback
             # (= 直近に deploy した version を前 version に戻す)。
             echo "::warning::no valid flip_from_revision; falling back to 'wrangler rollback'"
-            npx wrangler rollback
+            npx wrangler rollback --name "$CF_WORKER_NAME"
           fi
 
       # rollback 後の traffic split を ci-dashboard に報告 (Traffic 表示を実機に追従)。
@@ -515,6 +523,11 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ needs.dispatch.outputs.cf_account_id }}
+          # worker 名を明示。checkout root には wrangler config が無いことが多い
+          # (e.g. alc-app は web/wrangler.jsonc) ため、`--name` 無しだと
+          # "You need to provide a name of your worker" で fail する。
+          # Refs ippoan/ci-dashboard#196。
+          CF_WORKER_NAME: ${{ needs.dispatch.outputs.cf_worker_name }}
           PREVIEWED_VERSION_ID: ${{ github.event.client_payload.previewed_version_id }}
         run: |
           set -euo pipefail
@@ -524,7 +537,7 @@ jobs:
             exit 1
           fi
           echo "traffic rollback: deploy version $VID @100%"
-          npx wrangler versions deploy "${VID}@100%" --yes
+          npx wrangler versions deploy "${VID}@100%" --name "$CF_WORKER_NAME" --yes
 
       # rollback 後の traffic split を ci-dashboard に報告 (Traffic 表示を実機に追従)。
       # Refs ippoan/ci-dashboard#237。
