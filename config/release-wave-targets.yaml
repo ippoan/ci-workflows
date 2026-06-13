@@ -79,6 +79,12 @@ targets:
     preview_hostname: preview-carins.ippoan.org
     npm_scope: '@ippoan'  # @ippoan/auth-client
 
+  "ippoan/nuxt-items":
+    platform: cloudflare-workers
+    cf_worker_name: nuxt-items
+    cf_account_id: 24b45709d060d957340180e995f0d373
+    npm_scope: '@ippoan'
+
   "ippoan/nuxt-egov":
     platform: cloudflare-workers
     cf_worker_name: nuxt-egov
