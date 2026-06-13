@@ -352,6 +352,10 @@ jobs:
           ci_dashboard_base_url: ${{ inputs.callback_base_url }}
           webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
           repo: ${{ github.repository }}
+          # checkout root に wrangler config が無いため worker 名を明示
+          # (無いと wrangler deployments list が失敗し traffic-report が skip
+          # → dashboard が flip 後の % に追従しない)。Refs ippoan/ci-dashboard#237。
+          cf_worker_name: ${{ needs.dispatch.outputs.cf_worker_name }}
           uploaded_version_id: ${{ github.event.client_payload.previewed_version_id }}
           tag: ${{ needs.dispatch.outputs.target_tag }}
 
@@ -480,6 +484,10 @@ jobs:
           ci_dashboard_base_url: ${{ inputs.callback_base_url }}
           webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
           repo: ${{ github.repository }}
+          # checkout root に wrangler config が無いため worker 名を明示
+          # (無いと wrangler deployments list が失敗し traffic-report が skip
+          # → dashboard が flip 後の % に追従しない)。Refs ippoan/ci-dashboard#237。
+          cf_worker_name: ${{ needs.dispatch.outputs.cf_worker_name }}
           uploaded_version_id: ${{ github.event.client_payload.flip_from_revision }}
           tag: ${{ needs.dispatch.outputs.target_tag }}
 
@@ -549,6 +557,10 @@ jobs:
           ci_dashboard_base_url: ${{ inputs.callback_base_url }}
           webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
           repo: ${{ github.repository }}
+          # checkout root に wrangler config が無いため worker 名を明示
+          # (無いと wrangler deployments list が失敗し traffic-report が skip
+          # → dashboard が flip 後の % に追従しない)。Refs ippoan/ci-dashboard#237。
+          cf_worker_name: ${{ needs.dispatch.outputs.cf_worker_name }}
           uploaded_version_id: ${{ github.event.client_payload.previewed_version_id }}
           tag: ${{ needs.dispatch.outputs.target_tag }}
 
