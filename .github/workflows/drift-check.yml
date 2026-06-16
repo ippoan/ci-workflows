@@ -1,0 +1,207 @@
+name: drift-check
+
+# Reusable workflow that verifies a consumer service's runtime-resolved secret
+# value matches what is stored in GCP Secret Manager (the source of truth).
+#
+# Flow:
+#   1. Authenticate to GCP via WIF.
+#   2. Read the latest version of `secret_name` from `gcp_project`.
+#   3. Compute sha256[0..8] of the value.
+#   4. Call the consumer's `?name=<secret_name>&expected=<8hex>` endpoint.
+#   5. Assert response body is `{"match": true}` (= consumer's runtime value
+#      hashes to the same prefix).
+#
+# Consumer contract (the endpoint at `consumer_url`):
+#   GET  ?name=<binding>&expected=<8hex>
+#   200  {"match": true | false}
+#   - `match: false` covers value mismatch / env absent / typo (oracle-free).
+#   - timing-safe compare on the consumer side.
+#   - returns 200 even on mismatch (the boolean *is* the signal).
+#   - non-2xx is treated as a probe failure (= drift cannot be ruled out).
+#
+# The raw secret value never leaves the runner: only its sha256 prefix is sent
+# on the wire, and the consumer never echoes the value back either.
+#
+# Caller responsibility:
+#   - The WIF runner SA must hold `roles/secretmanager.secretAccessor` on the
+#     target secret. Grant per-secret rather than project-wide.
+#   - For multiple secrets, call this reusable in a matrix from the caller.
+#
+# Typical caller:
+#
+#   drift-check-staging:
+#     needs: [deploy-staging]
+#     uses: ippoan/ci-workflows/.github/workflows/drift-check.yml@main
+#     permissions:
+#       id-token: write
+#       contents: read
+#     with:
+#       consumer_url: 'https://auth-staging.ippoan.org/health/secret-fingerprint'
+#       secret_name: 'INTERNAL_SHARED_SECRET'
+#       gcp_project: 'cloudsql-sv'
+#       gcp_wif_provider: ${{ vars.GCP_WIF_PROVIDER }}
+#       gcp_wif_service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT_STAGING }}
+
+on:
+  workflow_call:
+    inputs:
+      consumer_url:
+        description: 'Consumer endpoint URL accepting `?name=&expected=` (no trailing query). e.g. `https://auth-staging.ippoan.org/health/secret-fingerprint`.'
+        type: string
+        required: true
+      secret_name:
+        description: 'GCP Secret Manager secret name AND the binding/env name on the consumer (they MUST match; that is what drift-check verifies).'
+        type: string
+        required: true
+      gcp_project:
+        description: 'GCP project ID hosting the secret (e.g. `cloudsql-sv`).'
+        type: string
+        required: true
+      gcp_wif_provider:
+        description: 'WIF provider resource name. Typically passed as vars.GCP_WIF_PROVIDER from the caller.'
+        type: string
+        required: true
+      gcp_wif_service_account:
+        description: 'WIF impersonation target SA email. Typically passed as vars.GCP_WIF_SERVICE_ACCOUNT_STAGING from the caller.'
+        type: string
+        required: true
+      curl_max_time:
+        description: 'curl --max-time for the consumer probe (seconds). Default 10.'
+        type: number
+        required: false
+        default: 10
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: drift-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate inputs
+        env:
+          CONSUMER_URL: ${{ inputs.consumer_url }}
+          SECRET_NAME: ${{ inputs.secret_name }}
+        run: |
+          set -euo pipefail
+          # secret_name must satisfy the GCP Secret Manager naming rule:
+          # `[A-Za-z][A-Za-z0-9_-]{0,254}`. This is also a sanity check
+          # against accidental shell metacharacters in the value passed to
+          # gcloud / curl.
+          if ! printf '%s' "$SECRET_NAME" | grep -qE '^[A-Za-z][A-Za-z0-9_-]{0,254}$'; then
+            echo "::error::secret_name must match [A-Za-z][A-Za-z0-9_-]{0,254}, got: $SECRET_NAME"
+            exit 1
+          fi
+          # consumer_url must be https:// — never want to send the expected
+          # prefix in cleartext, even though it is non-reversible.
+          case "$CONSUMER_URL" in
+            https://*) ;;
+            *)
+              echo "::error::consumer_url must be https://, got: $CONSUMER_URL"
+              exit 1
+              ;;
+          esac
+
+      - name: Authenticate to GCP (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.gcp_wif_provider }}
+          service_account: ${{ inputs.gcp_wif_service_account }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Compute expected fingerprint and probe consumer
+        env:
+          CONSUMER_URL: ${{ inputs.consumer_url }}
+          SECRET_NAME: ${{ inputs.secret_name }}
+          GCP_PROJECT: ${{ inputs.gcp_project }}
+          CURL_MAX_TIME: ${{ inputs.curl_max_time }}
+        run: |
+          set -euo pipefail
+
+          # `gcloud secrets versions access` writes the raw bytes to stdout.
+          # We pipe it directly into sha256sum without intermediate var
+          # expansion to avoid the value ever landing in a shell variable.
+          # `tr -d '\n'` strips a single trailing newline injected by the
+          # gcloud client when the source bytes do not already end in \n
+          # (consistent with how the consumer hashes the binding value).
+          EXPECTED=$(
+            gcloud secrets versions access latest \
+              --secret="$SECRET_NAME" \
+              --project="$GCP_PROJECT" \
+              | tr -d '\n' \
+              | sha256sum \
+              | cut -c1-8
+          )
+
+          if ! printf '%s' "$EXPECTED" | grep -qE '^[0-9a-f]{8}$'; then
+            echo "::error::failed to compute sha256[0..8] for $SECRET_NAME in $GCP_PROJECT"
+            exit 1
+          fi
+
+          # Encode query params with python so a `+`/`&`/`#` in secret_name
+          # cannot break the URL (validate step already restricts it, but
+          # defensive coding is cheap).
+          QS=$(python3 -c 'import os, urllib.parse as u; print(u.urlencode({"name": os.environ["SECRET_NAME"], "expected": os.environ["EXPECTED"]}))' EXPECTED="$EXPECTED")
+          # Build full URL with `?` or `&` depending on whether consumer_url
+          # already has a query string (it shouldn't, but cheap to handle).
+          case "$CONSUMER_URL" in
+            *\?*) FULL_URL="${CONSUMER_URL}&${QS}" ;;
+            *)    FULL_URL="${CONSUMER_URL}?${QS}" ;;
+          esac
+
+          # `-w '\n%{http_code}'` appends the status code on its own final
+          # line so we can split body / status without a header dump.
+          RES=$(curl -sS -w '\n%{http_code}' --max-time "$CURL_MAX_TIME" "$FULL_URL" || true)
+          STATUS=$(printf '%s' "$RES" | tail -n1)
+          BODY=$(printf '%s' "$RES" | sed '$d')
+
+          {
+            echo "# drift-check"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Secret name | \`$SECRET_NAME\` |"
+            echo "| GCP project | \`$GCP_PROJECT\` |"
+            echo "| Consumer URL | \`$CONSUMER_URL\` |"
+            echo "| HTTP status | \`$STATUS\` |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::consumer endpoint returned HTTP $STATUS (expected 200)"
+            echo "Body: $BODY"
+            {
+              echo "## ❌ Probe failed"
+              echo ""
+              echo "Consumer endpoint did not return 200, so drift status is unknown."
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          MATCH=$(printf '%s' "$BODY" | jq -r '.match // false')
+          if [ "$MATCH" != "true" ]; then
+            echo "::error::DRIFT: $SECRET_NAME on consumer ≠ GCP SM (project=$GCP_PROJECT)"
+            {
+              echo "## ❌ Drift detected"
+              echo ""
+              echo "The consumer's runtime value for \`$SECRET_NAME\` does not match GCP Secret Manager."
+              echo "Re-rotate / re-deploy so both stores converge."
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          {
+            echo "## ✅ Match"
+            echo ""
+            echo "\`$SECRET_NAME\` on the consumer matches GCP Secret Manager."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice ::✓ $SECRET_NAME match on $CONSUMER_URL"
