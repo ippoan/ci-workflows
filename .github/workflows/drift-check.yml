@@ -58,11 +58,11 @@ on:
         type: string
         required: true
       gcp_wif_provider:
-        description: 'WIF provider resource name. Typically `${{ vars.GCP_WIF_PROVIDER }}`.'
+        description: 'WIF provider resource name. Typically passed as vars.GCP_WIF_PROVIDER from the caller.'
         type: string
         required: true
       gcp_wif_service_account:
-        description: 'WIF impersonation target SA email. Typically `${{ vars.GCP_WIF_SERVICE_ACCOUNT_STAGING }}`.'
+        description: 'WIF impersonation target SA email. Typically passed as vars.GCP_WIF_SERVICE_ACCOUNT_STAGING from the caller.'
         type: string
         required: true
       curl_max_time:
