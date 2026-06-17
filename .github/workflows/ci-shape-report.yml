@@ -49,8 +49,14 @@ on:
         type: string
         default: 'main'
     secrets:
+      # 同 org caller の `secrets: inherit` でも参照できるよう、両方の名前を
+      # explicit に declare (actionlint が `secrets.X` 参照を `secrets:` map と
+      # 突き合わせるため)。
       CI_SHAPE_SECRET:
-        description: 'X-CI-Shape-Secret value (= ippoan org RELEASE_WAVE_WEBHOOK_SECRET)。未指定なら secrets.RELEASE_WAVE_WEBHOOK_SECRET を default で使う'
+        description: 'X-CI-Shape-Secret value。未指定なら RELEASE_WAVE_WEBHOOK_SECRET を default で使う'
+        required: false
+      RELEASE_WAVE_WEBHOOK_SECRET:
+        description: '同値 fallback (ippoan org secret)。同 org caller の `secrets: inherit` でこちらが入る'
         required: false
 
 permissions:
