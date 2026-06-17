@@ -73,6 +73,11 @@ on:
         required: false
         type: string
         default: 'nightly'
+      cap_catalog_ref:
+        description: 'ippoan/cap-catalog の checkout ref (extractor script の version pin 用)。default: main。'
+        required: false
+        type: string
+        default: 'main'
       node_version:
         description: 'Node version (ts/js extractor のみ参照、default: `20`)。actions/setup-node に渡す。'
         required: false
@@ -160,6 +165,25 @@ jobs:
           workspaces: ${{ inputs.working_directory }}
           cache-targets: false  # target/ は sccache + 自前 cache action 任せ
 
+      # cap-catalog の `scripts/extract-rust.py` を rust step で使うため、
+      # caller の checkout とは別 path に co-check する。pin は inputs.cap_catalog_ref
+      # (default main)。working_directory の中身を上書きしないよう repo root の
+      # `.cap-catalog/` に置く (caller の workspace に `.cap-catalog/` を持つ repo は
+      # 想定外、衝突時は `cap_catalog_ref` ではなく caller 側で path 譲歩する想定)。
+      - name: Checkout cap-catalog (extractor scripts)
+        if: inputs.language == 'rust'
+        uses: actions/checkout@v4
+        with:
+          repository: ippoan/cap-catalog
+          ref: ${{ inputs.cap_catalog_ref }}
+          path: .cap-catalog
+
+      - name: Setup Python (rust extractor)
+        if: inputs.language == 'rust'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Extract (rust)
         if: inputs.language == 'rust'
         env:
@@ -167,10 +191,17 @@ jobs:
           SHA: ${{ github.sha }}
           SCCACHE_GHA_ENABLED: 'true'
           RUSTC_WRAPPER: 'sccache'
+          # rustdoc JSON output は nightly + -Z unstable-options 必須。
+          # caller の Cargo features に左右されないよう `--no-deps` で workspace
+          # crate のみ rustdoc 化する。`cargo doc` は target/doc/<crate>.json を吐く。
+          RUSTDOCFLAGS: '-Z unstable-options --output-format json'
         run: |
           set -euo pipefail
-          echo "::notice::rust extractor not implemented yet (Refs ippoan/cap-catalog#4); emitting empty JSONL."
-          : > catalog-extract.jsonl
+          cargo doc --no-deps --workspace
+          python3 "$GITHUB_WORKSPACE/.cap-catalog/scripts/extract-rust.py" \
+            --repo "$REPO" --sha "$SHA" --json-dir target/doc \
+            > catalog-extract.jsonl
+          echo "::notice::rust extract: $(wc -l < catalog-extract.jsonl) symbol(s)"
 
       - name: sccache stats
         if: inputs.language == 'rust'
