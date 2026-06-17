@@ -72,6 +72,11 @@ on:
         required: false
         type: string
         default: '.'
+      submodules:
+        description: 'actions/checkout@v4 の `submodules` 値 (`""` = 取らない / `"true"` = top-level のみ / `"recursive"` = 再帰)。submodule に Cargo.toml が居る workspace (例: ohishi-exp/browser-render-rust) で `recursive` を渡す。default は空文字 (= 既存挙動を維持)。'
+        required: false
+        type: string
+        default: ''
     secrets:
       BUILD_SECRET:
         description: 'Optional secret value injected into `cargo build --release` env under `build_secret_env_name`.'
@@ -92,6 +97,8 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: ${{ inputs.submodules }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -105,6 +112,8 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: ${{ inputs.submodules }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -125,6 +134,8 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: ${{ inputs.submodules }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
@@ -143,6 +154,8 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: ${{ inputs.submodules }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
@@ -198,6 +211,8 @@ jobs:
       RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: ${{ inputs.submodules }}
       - name: Detect coverage_100.toml
         id: detect
         run: |
