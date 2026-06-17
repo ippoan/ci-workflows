@@ -1,0 +1,259 @@
+name: Catalog Extract
+
+# ippoan/cap-catalog 連携の reusable workflow (Refs ippoan/cap-catalog#3)。
+#
+# 言語別に source repo を解析して、cap-catalog の symbols 表に投入できる正規化
+# JSONL を artifact として出力する。本 file は dispatcher (#3) のみ。
+# 各言語の実体は ippoan/cap-catalog#4 (rust) / #5 (ts) / #6 (go) で順次追加する。
+#
+# JSONL の 1 行 schema (= cap-catalog/schema/catalog.sql の symbols + features に
+# 投入できる形):
+#   {
+#     "repo": "ippoan/auth-worker",
+#     "language": "rust" | "ts" | "js" | "go",
+#     "kind": "fn" | "struct" | "trait" | "class" | "iface" | "type" | "lib" | "crate" | "module",
+#     "name": "createAuthFetch",
+#     "fq_path": "auth-client::createAuthFetch",
+#     "signature": "(opts: Opts) => Fetch",
+#     "doc": "Wraps fetch with auth-worker JWT refresh.",
+#     "file": "packages/auth-client/src/fetch.ts",
+#     "line": 42,
+#     "commit_sha": "abc123",
+#     "features": ["auth-fetch"]
+#   }
+#
+# Cache 設計 (rust-flickr#28-#32 / rust-alc-api#427 で確立した pattern):
+#
+#   1. **shared-key 統合**: caller repo 名 + language で 1 つの cache key を
+#      共有する。同一 caller の連続 run が同じ key を read-only restore する。
+#   2. **非対称 save-if**: `save-if: github.event_name == 'push' && refs/heads/main`
+#      — main push でだけ save、PR run は restore のみ。
+#      = PR の中途半端な target/ が main の cache を上書きする事故を防ぐ。
+#   3. **sccache 併用** (rust のみ): rust-cache (target/) + sccache (compiler input)
+#      の 2 段でヒット率を最大化。
+#   4. **node/go は setup-action 内蔵 cache** で npm / go mod を扱う。
+#
+# Caller 例:
+#   jobs:
+#     extract:
+#       uses: ippoan/ci-workflows/.github/workflows/catalog-extract.yml@main
+#       with:
+#         language: rust
+#         working_directory: '.'
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: 'Source language. Must be one of: rust | ts | js | go.'
+        required: true
+        type: string
+      working_directory:
+        description: 'Source root inside the caller repo (default: repo root).'
+        required: false
+        type: string
+        default: '.'
+      output_artifact_name:
+        description: 'Artifact name for the emitted JSONL.'
+        required: false
+        type: string
+        default: 'catalog-extract'
+      artifact_retention_days:
+        description: 'Artifact retention days (cap-catalog builder pulls within this window).'
+        required: false
+        type: number
+        default: 7
+      shared_key:
+        description: 'Cache shared-key suffix. Default is `<repo-name>-catalog-<language>`. release/CI と key 衝突しないよう suffix で分離する。'
+        required: false
+        type: string
+        default: ''
+      rust_toolchain:
+        description: 'Rust toolchain channel (rust extractor のみ参照、default: `nightly` — rustdoc --output-format json は nightly 必須)。'
+        required: false
+        type: string
+        default: 'nightly'
+      node_version:
+        description: 'Node version (ts/js extractor のみ参照、default: `20`)。actions/setup-node に渡す。'
+        required: false
+        type: string
+        default: '20'
+      go_version:
+        description: 'Go version (go extractor のみ参照、default: `1.24`)。actions/setup-go に渡す。'
+        required: false
+        type: string
+        default: '1.24'
+    outputs:
+      artifact_name:
+        description: 'Name of the uploaded artifact containing catalog-extract.jsonl.'
+        value: ${{ jobs.extract.outputs.artifact_name }}
+
+permissions:
+  contents: read
+
+env:
+  # main push でだけ cache save (非対称 save-if) — PR run は restore のみ。
+  CACHE_SAVE_IF: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+jobs:
+  extract:
+    name: extract (${{ inputs.language }})
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ inputs.output_artifact_name }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Validate language input
+        env:
+          LANGUAGE: ${{ inputs.language }}
+        run: |
+          set -euo pipefail
+          case "$LANGUAGE" in
+            rust|ts|js|go) ;;
+            *)
+              echo "::error::language must be one of: rust, ts, js, go (got: '$LANGUAGE')"
+              exit 1
+              ;;
+          esac
+
+      - name: Compute shared-key
+        id: cache_key
+        env:
+          INPUT_KEY: ${{ inputs.shared_key }}
+          LANGUAGE: ${{ inputs.language }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_KEY" ]; then
+            KEY="$INPUT_KEY"
+          else
+            KEY="${REPO_NAME}-catalog-${LANGUAGE}"
+          fi
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      # -------- Rust --------
+      # nightly rustdoc + rust-cache (target/) + sccache (compiler input)。
+      # save-if は main push のみ (= 非対称 save-if、rust-alc-api#427 で確立)。
+      - name: Setup Rust (nightly)
+        if: inputs.language == 'rust'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+          components: rustfmt
+
+      - name: Setup sccache
+        if: inputs.language == 'rust'
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Setup rust-cache (target/)
+        if: inputs.language == 'rust'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ steps.cache_key.outputs.key }}
+          save-if: ${{ env.CACHE_SAVE_IF }}
+          workspaces: ${{ inputs.working_directory }}
+          cache-targets: false  # target/ は sccache + 自前 cache action 任せ
+
+      - name: Extract (rust)
+        if: inputs.language == 'rust'
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          SCCACHE_GHA_ENABLED: 'true'
+          RUSTC_WRAPPER: 'sccache'
+        run: |
+          set -euo pipefail
+          echo "::notice::rust extractor not implemented yet (Refs ippoan/cap-catalog#4); emitting empty JSONL."
+          : > catalog-extract.jsonl
+
+      - name: sccache stats
+        if: inputs.language == 'rust'
+        env:
+          SCCACHE_GHA_ENABLED: 'true'
+        run: sccache --show-stats || true
+
+      # -------- TS / JS --------
+      # actions/setup-node の built-in `cache: npm` を使う。lockfile (package-lock.json /
+      # yarn.lock / pnpm-lock.yaml) を auto-detect する。
+      - name: Setup Node
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.working_directory }}/package-lock.json
+
+      - name: Extract (ts/js)
+        if: inputs.language == 'ts' || inputs.language == 'js'
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "::notice::ts/js extractor not implemented yet (Refs ippoan/cap-catalog#5); emitting empty JSONL."
+          : > catalog-extract.jsonl
+
+      # -------- Go --------
+      # actions/setup-go の built-in cache。go.sum を auto-detect。
+      - name: Setup Go
+        if: inputs.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+          cache: true
+          cache-dependency-path: ${{ inputs.working_directory }}/go.sum
+
+      - name: Extract (go)
+        if: inputs.language == 'go'
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "::notice::go extractor not implemented yet (Refs ippoan/cap-catalog#6); emitting empty JSONL."
+          : > catalog-extract.jsonl
+
+      # -------- Validate + upload --------
+      - name: Validate JSONL shape (every line must parse as JSON object)
+        run: |
+          set -euo pipefail
+          if [ ! -s catalog-extract.jsonl ]; then
+            echo "catalog-extract.jsonl is empty (extractor not implemented yet) — accepted."
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json, sys
+          required = {"repo", "language", "kind", "name", "fq_path"}
+          with open("catalog-extract.jsonl") as f:
+              for i, line in enumerate(f, 1):
+                  line = line.strip()
+                  if not line:
+                      continue
+                  try:
+                      obj = json.loads(line)
+                  except Exception as e:
+                      print(f"::error::line {i}: invalid JSON ({e})")
+                      sys.exit(1)
+                  missing = required - obj.keys()
+                  if missing:
+                      print(f"::error::line {i}: missing required field(s): {sorted(missing)}")
+                      sys.exit(1)
+                  lang = obj["language"]
+                  if lang not in {"rust", "ts", "js", "go"}:
+                      print(f"::error::line {i}: invalid language '{lang}'")
+                      sys.exit(1)
+          print("JSONL shape OK")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.output_artifact_name }}
+          path: ${{ inputs.working_directory }}/catalog-extract.jsonl
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact_retention_days }}
