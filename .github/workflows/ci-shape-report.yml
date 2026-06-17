@@ -1,0 +1,101 @@
+name: ci-shape-report
+
+# Reusable: caller repo の `.github/workflows/*.yml` を parse して
+# ci-dashboard `/webhooks/ci-shape` に shape JSON を POST する。
+# `/ci-matrix` UI のデータ source (Refs ippoan/ci-dashboard#378)。
+#
+# 認証は ippoan org secret `RELEASE_WAVE_WEBHOOK_SECRET` を再利用
+# (= 値は ci-dashboard の `X-CI-Shape-Secret` 期待値と同値)。
+#
+# Caller (`<repo>/.github/workflows/ci-shape-report.yml`):
+#
+#   name: ci-shape-report
+#   on:
+#     push:
+#       branches: [main]
+#       paths:
+#         - '.github/workflows/**'
+#     pull_request:
+#       branches: [main]
+#       paths:
+#         - '.github/workflows/**'
+#   permissions:
+#     contents: read
+#   jobs:
+#     report:
+#       uses: ippoan/ci-workflows/.github/workflows/ci-shape-report.yml@main
+#       secrets: inherit
+#
+# クロス org caller (ohishi-exp / yhonda-ohishi) の場合は `secrets: inherit`
+# が効かないため明示渡しが必要 (auto-merge.yml と同 pattern):
+#
+#     jobs:
+#       report:
+#         uses: ippoan/ci-workflows/.github/workflows/ci-shape-report.yml@main
+#         secrets:
+#           CI_SHAPE_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+
+on:
+  workflow_call:
+    inputs:
+      dashboard_origin:
+        description: 'ci-dashboard origin (default = production https://ci-dashboard.ippoan.org)'
+        required: false
+        type: string
+        default: 'https://ci-dashboard.ippoan.org'
+      ci_workflows_ref:
+        description: 'ci-workflows ref to fetch ci-shape-report.py from (= reusable と一致させる)'
+        required: false
+        type: string
+        default: 'main'
+    secrets:
+      # 同 org caller の `secrets: inherit` でも参照できるよう、両方の名前を
+      # explicit に declare (actionlint が `secrets.X` 参照を `secrets:` map と
+      # 突き合わせるため)。
+      CI_SHAPE_SECRET:
+        description: 'X-CI-Shape-Secret value。未指定なら RELEASE_WAVE_WEBHOOK_SECRET を default で使う'
+        required: false
+      RELEASE_WAVE_WEBHOOK_SECRET:
+        description: '同値 fallback (ippoan org secret)。同 org caller の `secrets: inherit` でこちらが入る'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout caller (workflows only)
+        uses: actions/checkout@v4
+        with:
+          # 巨大 repo でも軽い: workflows ディレクトリだけ取れば足りる
+          sparse-checkout: |
+            .github/workflows
+          sparse-checkout-cone-mode: false
+
+      - name: Fetch ci-shape-report.py from ci-workflows
+        env:
+          CI_WORKFLOWS_REF: ${{ inputs.ci_workflows_ref }}
+        run: |
+          set -eu
+          url="https://raw.githubusercontent.com/ippoan/ci-workflows/${CI_WORKFLOWS_REF}/scripts/ci-shape-report.py"
+          curl -fsSL --retry 3 --retry-delay 2 -o ci-shape-report.py "$url"
+          chmod +x ci-shape-report.py
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install yaml parser
+        run: pip install --quiet 'pyyaml>=6.0'
+
+      - name: Build + POST shape report
+        env:
+          CI_SHAPE_DASHBOARD: ${{ inputs.dashboard_origin }}
+          # caller が `secrets:` で明示渡ししていればそれを、無ければ
+          # `secrets.RELEASE_WAVE_WEBHOOK_SECRET` (= 同 org caller 用の
+          # default) を採用。両方空なら python 側で `CI_SHAPE_SECRET is
+          # empty` と loud に fail する。
+          CI_SHAPE_SECRET: ${{ secrets.CI_SHAPE_SECRET || secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+        run: python ci-shape-report.py
