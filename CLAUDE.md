@@ -416,6 +416,79 @@ reusable input `release_wave_gcp_base_url` で release-wave-gcp の URL を
 
 `github.event.client_payload.*` (= ci-dashboard から送られる任意 JSON) は **untrusted** として扱い、`wave_id` / `target_tag` / `head_sha` を `actions/checkout` の `ref:` に使う前に正規表現で形式検証する。ref injection 防止は本 reusable の dispatch job 内で済ませてある。
 
+### catalog-extract.yml
+
+`ippoan/cap-catalog` 連携の reusable (Refs ippoan/cap-catalog#3)。caller repo のソースコードを言語別に解析して、cap-catalog の `symbols` テーブルに投入できる正規化 JSONL を artifact として出力する。
+
+#### dispatcher (本 reusable) と extractor (cap-catalog#4/#5/#6) の分離
+
+本 file は **dispatcher のみ** — 入力検証 / cache setup / artifact 検証・upload。各言語の実体 (rustdoc JSON → JSONL 変換等) は `ippoan/cap-catalog#4/#5/#6` で順次追加する。現状は extractor 未実装で empty JSONL を upload する。
+
+#### Cache 設計 (rust-flickr#28-#32 / rust-alc-api#427 pattern)
+
+`rust-alc-api` で確立した「shared-key 統合 + 非対称 save-if」を本 reusable にも持ち込む:
+
+- **shared-key**: default `<caller-repo>-catalog-<language>`。caller の `shared_key` input で override 可。release reusable と key 衝突しないよう suffix で分離。
+- **`save-if: github.event_name == 'push' && refs/heads/main` のみ** (= 非対称 save-if)。PR run は restore のみ、中途半端な target/ が main の cache を上書きしない。
+- **Rust**: `Swatinem/rust-cache@v2` (target/) + `mozilla-actions/sccache-action@v0.0.9` (compiler input) の 2 段。`cache-targets: false` で rust-cache と sccache の責務を分ける。
+- **TS/JS**: `actions/setup-node@v4` 内蔵 `cache: 'npm'` (`cache-dependency-path` は `<working_directory>/package-lock.json` 固定)。
+- **Go**: `actions/setup-go@v5` 内蔵 `cache: true` (`cache-dependency-path` は `<working_directory>/go.sum` 固定)。
+
+#### Caller テンプレート
+
+```yaml
+# <repo>/.github/workflows/cap-catalog-extract.yml
+name: cap-catalog extract
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  extract:
+    uses: ippoan/ci-workflows/.github/workflows/catalog-extract.yml@main
+    with:
+      language: rust
+      # working_directory: '.'
+      # shared_key: ''             # default は <repo>-catalog-<lang>
+      # rust_toolchain: 'nightly'  # rustdoc --output-format json は nightly 必須
+```
+
+#### 主な inputs
+
+| input | デフォルト | 説明 |
+|---|---|---|
+| `language` | (required) | `rust` \| `ts` \| `js` \| `go` の 4 値、白リスト検証 |
+| `working_directory` | `.` | source root (extractor の cwd) |
+| `output_artifact_name` | `catalog-extract` | upload する artifact 名 (cap-catalog builder が pull する key) |
+| `artifact_retention_days` | `7` | builder の pull window。長すぎると stale 取り込み risk |
+| `shared_key` | (auto: `<repo>-catalog-<language>`) | rust-cache の `shared-key`。複数の language を同 repo で扱う時に `language` 別 cache に分離する |
+| `rust_toolchain` | `nightly` | `dtolnay/rust-toolchain@master` の channel |
+| `node_version` | `'20'` | `actions/setup-node` の `node-version` |
+| `go_version` | `'1.24'` | `actions/setup-go` の `go-version` |
+
+#### JSONL schema (extractor が emit する 1 行 contract)
+
+```json
+{
+  "repo": "ippoan/auth-worker",
+  "language": "rust",
+  "kind": "fn",
+  "name": "createAuthFetch",
+  "fq_path": "auth-client::createAuthFetch",
+  "signature": "(opts: Opts) => Fetch",
+  "doc": "Wraps fetch with auth-worker JWT refresh.",
+  "file": "packages/auth-client/src/fetch.ts",
+  "line": 42,
+  "commit_sha": "abc123",
+  "features": ["auth-fetch"]
+}
+```
+
+`repo / language / kind / name / fq_path` は **required**。validate step で必須 field 不在 / 不正 language を loud fail させる (= extractor バグの早期検出)。
+
 ### tag-release.yml / dev-tag-release.yml
 
 リリースタグ自動採番の reusable 2 種:
