@@ -195,6 +195,10 @@ jobs:
           # caller の Cargo features に左右されないよう `--no-deps` で workspace
           # crate のみ rustdoc 化する。`cargo doc` は target/doc/<crate>.json を吐く。
           RUSTDOCFLAGS: '-Z unstable-options --output-format json'
+          # caller repo に `rust-toolchain.toml` (channel = "stable") があると
+          # rustup がそれを優先して `cargo doc` が stable で走り `-Z` が拒否される。
+          # RUSTUP_TOOLCHAIN を env で上書きすると `rust-toolchain.toml` を無視できる。
+          RUSTUP_TOOLCHAIN: ${{ inputs.rust_toolchain }}
         run: |
           set -euo pipefail
           cargo doc --no-deps --workspace
