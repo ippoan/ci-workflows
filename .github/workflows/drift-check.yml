@@ -147,7 +147,7 @@ jobs:
           # Encode query params with python so a `+`/`&`/`#` in secret_name
           # cannot break the URL (validate step already restricts it, but
           # defensive coding is cheap).
-          QS=$(python3 -c 'import os, urllib.parse as u; print(u.urlencode({"name": os.environ["SECRET_NAME"], "expected": os.environ["EXPECTED"]}))' EXPECTED="$EXPECTED")
+          QS=$(EXPECTED="$EXPECTED" python3 -c 'import os, urllib.parse as u; print(u.urlencode({"name": os.environ["SECRET_NAME"], "expected": os.environ["EXPECTED"]}))')
           # Build full URL with `?` or `&` depending on whether consumer_url
           # already has a query string (it shouldn't, but cheap to handle).
           case "$CONSUMER_URL" in
