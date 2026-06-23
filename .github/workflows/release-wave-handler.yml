@@ -61,6 +61,18 @@ on:
         required: false
         type: string
         default: 'https://release-wave-gcp-staging-566bls5vfq-an.a.run.app'
+    secrets:
+      # cross-org caller (例: ohishi-exp/*) は `secrets: inherit` だと secret が
+      # 渡らない (GitHub 仕様: inherit は同一 org/enterprise 内のみ有効)。明示渡し
+      # できるよう optional 宣言する。same-org caller は従来どおり `secrets: inherit`
+      # で全 secret が渡る (secrets: 宣言があっても inherit は全 secret を pass する
+      # ため後方互換)。GITHUB_TOKEN は reusable に auto-provide されるので宣言不要。
+      CLOUDFLARE_API_TOKEN:
+        required: false
+      RELEASE_WAVE_WEBHOOK_SECRET:
+        required: false
+      RELEASE_WAVE_GCP_API_KEY:
+        required: false
 
 permissions:
   contents: write       # tag push
