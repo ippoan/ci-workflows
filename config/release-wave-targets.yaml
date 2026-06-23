@@ -101,3 +101,16 @@ targets:
     cf_account_id: 24b45709d060d957340180e995f0d373
     preview_hostname: preview-trouble.ippoan.org
     npm_scope: '@ippoan'
+
+  # nuxt-dtako-admin (dtako 運行データ管理画面、worker 名 dtako-admin)。
+  # ohishi-exp org の repo (cross-org) だが platform は他の CF Worker と同じ。
+  # @ippoan/auth-client (AuthCallback 等) を使うので npm_scope 必須。
+  # NOTE: cross-org caller のため release-wave.yml は secrets を明示渡しする
+  # (RELEASE_WAVE_WEBHOOK_SECRET / CLOUDFLARE_API_TOKEN を ohishi-exp org に
+  # 投入しておく必要がある)。
+  "ohishi-exp/nuxt-dtako-admin":
+    platform: cloudflare-workers
+    cf_worker_name: dtako-admin
+    cf_account_id: 24b45709d060d957340180e995f0d373
+    preview_hostname: preview-dtako.ippoan.org
+    npm_scope: '@ippoan'
