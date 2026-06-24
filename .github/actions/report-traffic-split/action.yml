@@ -33,6 +33,16 @@ inputs:
       では空で良い (wrangler が config から名前を解決)。
     required: false
     default: ""
+  report_worker_name:
+    description: >-
+      monorepo unit の worker 名。設定すると traffic-report payload に
+      `worker_name` を載せ、ci-dashboard が per-worker
+      (`traffic::<repo>::<worker>`) で記録する (Refs ippoan/ci-dashboard#427)。
+      **`cf_worker_name` (= wrangler `--name` 用) とは別物**。単一 worker repo は
+      空のままにする (= legacy repo-key、frontends 判定など既存挙動を維持)。
+      monorepo の unit deploy / 単一 unit flip でのみ設定する。
+    required: false
+    default: ""
   uploaded_version_id:
     description: tag を紐付ける version id (flip/rollback 対象)。省略可。
     required: false
@@ -54,6 +64,7 @@ runs:
         RELEASE_WAVE_WEBHOOK_SECRET: ${{ inputs.webhook_secret }}
         REPO: ${{ inputs.repo }}
         CF_WORKER_NAME: ${{ inputs.cf_worker_name }}
+        REPORT_WORKER_NAME: ${{ inputs.report_worker_name }}
         UPLOADED_VID: ${{ inputs.uploaded_version_id }}
         TAG: ${{ inputs.tag }}
       run: |
@@ -129,9 +140,15 @@ runs:
         if [ "$n" -eq 0 ]; then
           echo "::warning::version が 0 件; traffic-report skip"; exit 0; fi
 
-        payload=$(jq -nc --arg repo "$REPO" --argjson versions "$versions" \
-          '{repo: $repo, versions: $versions}')
-        echo "reporting traffic split: repo=$REPO ($n versions)"
+        # monorepo unit は report_worker_name を載せ ci-dashboard に per-worker
+        # (`traffic::<repo>::<worker>`) で記録させる (Refs ippoan/ci-dashboard#427)。
+        # 単一 worker repo は REPORT_WORKER_NAME 空 → legacy repo-key のまま
+        # (frontends 判定など既存挙動を維持)。`cf_worker_name` (= --name 用) とは別。
+        payload=$(jq -nc --arg repo "$REPO" --arg worker "${REPORT_WORKER_NAME:-}" \
+          --argjson versions "$versions" \
+          '{repo: $repo, versions: $versions}
+           + (if $worker != "" then {worker_name: $worker} else {} end)')
+        echo "reporting traffic split: repo=$REPO worker=${REPORT_WORKER_NAME:-"(none)"} ($n versions)"
         if curl -fsS -X POST "$CI_DASHBOARD_BASE/webhooks/release-wave/traffic-report" \
           -H "X-Release-Wave-Webhook-Secret: $RELEASE_WAVE_WEBHOOK_SECRET" \
           -H "Content-Type: application/json" \
