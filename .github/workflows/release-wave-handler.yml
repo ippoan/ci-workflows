@@ -95,7 +95,9 @@ jobs:
       target_tag:           ${{ steps.parse.outputs.target_tag }}
       head_sha:             ${{ steps.parse.outputs.head_sha }}
       platform:             ${{ steps.lookup.outputs.platform }}
-      cf_worker_name:       ${{ steps.lookup.outputs.cf_worker_name }}
+      # client_payload.cf_worker_name (monorepo の unit 指定) を優先し、無ければ
+      # targets.yaml の cf_worker_name (単一 worker repo 用) に fallback。
+      cf_worker_name:       ${{ steps.parse.outputs.cf_worker_name_override != '' && steps.parse.outputs.cf_worker_name_override || steps.lookup.outputs.cf_worker_name }}
       cf_account_id:        ${{ steps.lookup.outputs.cf_account_id }}
       preview_hostname:     ${{ steps.lookup.outputs.preview_hostname }}
       gcp_project:          ${{ steps.lookup.outputs.gcp_project }}
@@ -172,9 +174,23 @@ jobs:
             exit 1
           fi
 
+          # cf_worker_name (optional): monorepo repo (例: nuxt-notify は
+          # nuxt-notify / notify-email-receiver / notify-realtime-bus の 3 unit)
+          # で flip/rollback 対象の unit worker を ci-dashboard が指定するための
+          # per-call override。targets.yaml の cf_worker_name は単一 worker repo 用で
+          # monorepo では空になるため、client_payload で worker 名を受ける。
+          # `--name` に渡るので厳格に形式検証する (ref/command injection 防止)。
+          cf_worker_name_override=$(printf '%s' "$PAYLOAD" | jq -r '.cf_worker_name // ""')
+          if [[ -n "$cf_worker_name_override" ]] && \
+             ! [[ "$cf_worker_name_override" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; then
+            echo "::error::cf_worker_name has invalid format: must match ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\$"
+            exit 1
+          fi
+
           echo "wave_id=$wave_id"       >> "$GITHUB_OUTPUT"
           echo "target_tag=$target_tag" >> "$GITHUB_OUTPUT"
           echo "head_sha=$head_sha"     >> "$GITHUB_OUTPUT"
+          echo "cf_worker_name_override=$cf_worker_name_override" >> "$GITHUB_OUTPUT"
 
       # ci-workflows の config/release-wave-targets.yaml を sparse-checkout。
       # 同 repo 内 reusable だが、calling workflow context では他 path に
