@@ -69,6 +69,15 @@ on:
         description: 'Override release deploy script (default: auto by project_type)'
         type: string
         default: ''
+      report_worker_name:
+        description: |
+          monorepo unit の worker 名 (CF script 名)。設定すると pending-release /
+          traffic-report の payload に `worker_name` を載せ、ci-dashboard が
+          per-worker (`traffic::<repo>::<worker>`) で記録する
+          (Refs ippoan/ci-dashboard#427)。単一 worker repo は空のまま
+          (= legacy `traffic::<repo>`、既存挙動を維持)。
+        type: string
+        default: ''
       release_no_traffic:
         description: |
           v* リリースを no-traffic で deploy する (全 frontend 共通の既定挙動)。
@@ -1224,6 +1233,8 @@ jobs:
           RELEASE_WAVE_WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+          # monorepo unit のとき per-worker で pending-release を記録させる worker 名。
+          REPORT_WORKER_NAME: ${{ inputs.report_worker_name }}
         run: |
           set -uo pipefail
           CMD="$RELEASE_SCRIPT"
@@ -1296,9 +1307,10 @@ jobs:
             --arg version_id "$VID" \
             --arg tag "$TAG" \
             --arg preview_url "$PREVIEW" \
-            '{repo: $repo, version_id: $version_id, tag: $tag, preview_url: $preview_url}
+            --arg worker_name "${REPORT_WORKER_NAME:-}" \
+            '{repo: $repo, version_id: $version_id, tag: $tag, preview_url: $preview_url, worker_name: $worker_name}
              | with_entries(select(.value != ""))')
-          echo "reporting pending release: repo=$REPO version_id=$VID tag=$TAG"
+          echo "reporting pending release: repo=$REPO worker=${REPORT_WORKER_NAME:-"(none)"} version_id=$VID tag=$TAG"
           curl -fsS -X POST "$CI_DASHBOARD_BASE/webhooks/release-wave/pending-release" \
             -H "X-Release-Wave-Webhook-Secret: $RELEASE_WAVE_WEBHOOK_SECRET" \
             -H "Content-Type: application/json" \
@@ -1331,6 +1343,8 @@ jobs:
           CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
           RELEASE_WAVE_WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
           REPO: ${{ github.repository }}
+          # monorepo unit のとき per-worker で traffic を記録させる worker 名。
+          REPORT_WORKER_NAME: ${{ inputs.report_worker_name }}
           # 今 upload した version_id と、その release tag (github.ref_name)。
           # この version にだけ tag を紐付けて報告する。ci-dashboard は
           # version_id 単位に tag を merge 蓄積するので、過去 version の tag は残る。
@@ -1414,9 +1428,11 @@ jobs:
             exit 1
           fi
 
-          payload=$(jq -nc --arg repo "$REPO" --argjson versions "$versions" \
-            '{repo: $repo, versions: $versions}')
-          echo "reporting traffic split: repo=$REPO versions=$versions"
+          payload=$(jq -nc --arg repo "$REPO" --arg worker "${REPORT_WORKER_NAME:-}" \
+            --argjson versions "$versions" \
+            '{repo: $repo, versions: $versions}
+             + (if $worker != "" then {worker_name: $worker} else {} end)')
+          echo "reporting traffic split: repo=$REPO worker=${REPORT_WORKER_NAME:-"(none)"} versions=$versions"
           curl -fsS -X POST "$CI_DASHBOARD_BASE/webhooks/release-wave/traffic-report" \
             -H "X-Release-Wave-Webhook-Secret: $RELEASE_WAVE_WEBHOOK_SECRET" \
             -H "Content-Type: application/json" \
