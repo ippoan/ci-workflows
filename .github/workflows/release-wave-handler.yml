@@ -98,6 +98,9 @@ jobs:
       # client_payload.cf_worker_name (monorepo の unit 指定) を優先し、無ければ
       # targets.yaml の cf_worker_name (単一 worker repo 用) に fallback。
       cf_worker_name:       ${{ steps.parse.outputs.cf_worker_name_override != '' && steps.parse.outputs.cf_worker_name_override || steps.lookup.outputs.cf_worker_name }}
+      # monorepo unit override のみ (単一 worker repo は空)。traffic-report を
+      # per-worker (`traffic::<repo>::<worker>`) で記録させる report_worker_name 用。
+      cf_worker_name_override: ${{ steps.parse.outputs.cf_worker_name_override }}
       cf_account_id:        ${{ steps.lookup.outputs.cf_account_id }}
       preview_hostname:     ${{ steps.lookup.outputs.preview_hostname }}
       gcp_project:          ${{ steps.lookup.outputs.gcp_project }}
@@ -395,6 +398,9 @@ jobs:
           # (無いと wrangler deployments list が失敗し traffic-report が skip
           # → dashboard が flip 後の % に追従しない)。Refs ippoan/ci-dashboard#237。
           cf_worker_name: ${{ needs.dispatch.outputs.cf_worker_name }}
+          # monorepo unit override 時のみ per-worker で traffic-report する
+          # (単一 worker repo は空 = legacy repo-key、既存挙動維持)。
+          report_worker_name: ${{ needs.dispatch.outputs.cf_worker_name_override }}
           uploaded_version_id: ${{ github.event.client_payload.previewed_version_id }}
           tag: ${{ needs.dispatch.outputs.target_tag }}
 
@@ -532,6 +538,9 @@ jobs:
           # (無いと wrangler deployments list が失敗し traffic-report が skip
           # → dashboard が flip 後の % に追従しない)。Refs ippoan/ci-dashboard#237。
           cf_worker_name: ${{ needs.dispatch.outputs.cf_worker_name }}
+          # monorepo unit override 時のみ per-worker で traffic-report する
+          # (単一 worker repo は空 = legacy repo-key、既存挙動維持)。
+          report_worker_name: ${{ needs.dispatch.outputs.cf_worker_name_override }}
           uploaded_version_id: ${{ github.event.client_payload.flip_from_revision }}
           tag: ${{ needs.dispatch.outputs.target_tag }}
 
@@ -610,6 +619,9 @@ jobs:
           # (無いと wrangler deployments list が失敗し traffic-report が skip
           # → dashboard が flip 後の % に追従しない)。Refs ippoan/ci-dashboard#237。
           cf_worker_name: ${{ needs.dispatch.outputs.cf_worker_name }}
+          # monorepo unit override 時のみ per-worker で traffic-report する
+          # (単一 worker repo は空 = legacy repo-key、既存挙動維持)。
+          report_worker_name: ${{ needs.dispatch.outputs.cf_worker_name_override }}
           uploaded_version_id: ${{ github.event.client_payload.previewed_version_id }}
           tag: ${{ needs.dispatch.outputs.target_tag }}
 
