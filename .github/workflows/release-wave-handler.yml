@@ -336,6 +336,17 @@ jobs:
           PREVIEWED_VERSION_ID: ${{ github.event.client_payload.previewed_version_id }}
         run: |
           set -euo pipefail
+          # multi-env の root wrangler config (例: nuxt-notify は top-level prod +
+          # env.staging) が checkout root にあると、wrangler 4 の `versions deploy` が
+          # 「対象 env 未指定」で script 名を空にして 404 で失敗する (--name だけでは
+          # この env 必須チェックを抑制できない)。flip は prod = top-level を対象に
+          # するので、root config がある時だけ `--env=` (空文字 = top-level) を明示する。
+          # root config が無い repo (例 alc-app は web/wrangler.*) は従来どおり --name
+          # のみで動くため ENV_FLAG は空 = 無影響。
+          ENV_FLAG=()
+          if ls wrangler.toml wrangler.jsonc wrangler.json >/dev/null 2>&1; then
+            ENV_FLAG=(--env=)
+          fi
           VID="${PREVIEWED_VERSION_ID:-}"
           if [[ -n "$VID" ]]; then
             if ! [[ "$VID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
@@ -343,12 +354,12 @@ jobs:
               exit 1
             fi
             echo "flipping 100% traffic to previewed version $VID"
-            npx wrangler versions deploy "${VID}@100%" --name "$CF_WORKER_NAME" --yes
+            npx wrangler versions deploy "${VID}@100%" --name "$CF_WORKER_NAME" "${ENV_FLAG[@]}" --yes
           else
             # 後方互換: previewed_version_id 不在 (旧 dispatcher / 単独 release) は
             # 従来どおり現コードを deploy して flip する。
             echo "::warning::no previewed_version_id in payload; falling back to 'wrangler deploy'"
-            npx wrangler deploy --name "$CF_WORKER_NAME"
+            npx wrangler deploy --name "$CF_WORKER_NAME" "${ENV_FLAG[@]}"
           fi
 
       # flip 後の version traffic split を ci-dashboard に報告し、Traffic 表示を
@@ -475,15 +486,20 @@ jobs:
           FLIP_FROM_REVISION: ${{ github.event.client_payload.flip_from_revision }}
         run: |
           set -euo pipefail
+          # multi-env root config 対策 (flip と同じ。詳細は flip step のコメント参照)。
+          ENV_FLAG=()
+          if ls wrangler.toml wrangler.jsonc wrangler.json >/dev/null 2>&1; then
+            ENV_FLAG=(--env=)
+          fi
           VID="${FLIP_FROM_REVISION:-}"
           if [[ -n "$VID" ]] && [[ "$VID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
             echo "rolling back: deploy previous version $VID @100%"
-            npx wrangler versions deploy "${VID}@100%" --name "$CF_WORKER_NAME" --yes
+            npx wrangler versions deploy "${VID}@100%" --name "$CF_WORKER_NAME" "${ENV_FLAG[@]}" --yes
           else
             # flip_from_revision が無い / 形式不一致なら wrangler 既定の rollback
             # (= 直近に deploy した version を前 version に戻す)。
             echo "::warning::no valid flip_from_revision; falling back to 'wrangler rollback'"
-            npx wrangler rollback --name "$CF_WORKER_NAME"
+            npx wrangler rollback --name "$CF_WORKER_NAME" "${ENV_FLAG[@]}"
           fi
 
       # rollback 後の traffic split を ci-dashboard に報告 (Traffic 表示を実機に追従)。
@@ -551,13 +567,18 @@ jobs:
           PREVIEWED_VERSION_ID: ${{ github.event.client_payload.previewed_version_id }}
         run: |
           set -euo pipefail
+          # multi-env root config 対策 (flip と同じ。詳細は flip step のコメント参照)。
+          ENV_FLAG=()
+          if ls wrangler.toml wrangler.jsonc wrangler.json >/dev/null 2>&1; then
+            ENV_FLAG=(--env=)
+          fi
           VID="${PREVIEWED_VERSION_ID:-}"
           if ! [[ "$VID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
             echo "::error::previewed_version_id has invalid format (expected UUID)"
             exit 1
           fi
           echo "traffic rollback: deploy version $VID @100%"
-          npx wrangler versions deploy "${VID}@100%" --name "$CF_WORKER_NAME" --yes
+          npx wrangler versions deploy "${VID}@100%" --name "$CF_WORKER_NAME" "${ENV_FLAG[@]}" --yes
 
       # rollback 後の traffic split を ci-dashboard に報告 (Traffic 表示を実機に追従)。
       # Refs ippoan/ci-dashboard#237。
