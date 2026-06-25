@@ -1271,11 +1271,17 @@ jobs:
           fi
           echo "release deploy: $CMD"
           # 出力を capture しつつログにも出す (version id / preview URL 抽出用)。
+          # step shell は `bash -e` なので、`OUT=$(eval ...)` が失敗すると set -e で
+          # **printf 前に即 exit** し、build/wrangler のエラー本文がログに出ず
+          # 「release deploy: ...」の直後に exit 1 だけ残る (= 失敗原因が握り潰される)。
+          # capture 区間だけ set +e で囲み、rc を見てから必ず OUT を出力する。
+          set +e
           OUT=$(eval "$CMD" 2>&1)
           rc=$?
+          set -e
           printf '%s\n' "$OUT"
           if [ "$rc" -ne 0 ]; then
-            echo "::error::release deploy failed (rc=$rc)"
+            echo "::error::release deploy failed (rc=$rc) — 上の出力を参照"
             exit "$rc"
           fi
 
