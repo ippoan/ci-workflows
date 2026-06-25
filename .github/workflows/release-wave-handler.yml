@@ -414,11 +414,19 @@ jobs:
           REPO: ${{ github.repository }}
           CALLBACK: ${{ inputs.callback_base_url }}
           WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+          # 100% に flip した version + monorepo unit の worker 名を載せ、
+          # ci-dashboard が RepoState.deployed_version を保持できるようにする
+          # (Refs ippoan/ci-dashboard#427 Phase 2)。単一 worker repo は WORKER_NAME 空。
+          VERSION_ID: ${{ github.event.client_payload.previewed_version_id }}
+          WORKER_NAME: ${{ needs.dispatch.outputs.cf_worker_name_override }}
         run: |
           set -euo pipefail
           payload=$(jq -nc \
             --arg wave_id "$WAVE_ID" --arg repo "$REPO" \
-            '{wave_id: $wave_id, repo: $repo, ok: true}')
+            --arg version_id "${VERSION_ID:-}" --arg worker "${WORKER_NAME:-}" \
+            '{wave_id: $wave_id, repo: $repo, ok: true}
+             + (if $version_id != "" then {version_id: $version_id} else {} end)
+             + (if $worker != "" then {worker_name: $worker} else {} end)')
           curl -fsS -X POST "$CALLBACK/webhooks/release-wave/flip-report" \
             -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
             -H "Content-Type: application/json" \
@@ -455,12 +463,17 @@ jobs:
           REPO: ${{ github.repository }}
           CALLBACK: ${{ inputs.callback_base_url }}
           WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+          # 失敗時も monorepo unit を識別できるよう worker 名を載せる (audit)。
+          # version_id は flip 失敗で意味を成さないため送らない。Refs ippoan/ci-dashboard#427。
+          WORKER_NAME: ${{ needs.dispatch.outputs.cf_worker_name_override }}
         run: |
           set -euo pipefail
           payload=$(jq -nc \
             --arg wave_id "$WAVE_ID" --arg repo "$REPO" \
             --arg error "flip job failed; see Actions log" \
-            '{wave_id: $wave_id, repo: $repo, ok: false, error: $error}')
+            --arg worker "${WORKER_NAME:-}" \
+            '{wave_id: $wave_id, repo: $repo, ok: false, error: $error}
+             + (if $worker != "" then {worker_name: $worker} else {} end)')
           curl -fsS -X POST "$CALLBACK/webhooks/release-wave/flip-report" \
             -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
             -H "Content-Type: application/json" \
