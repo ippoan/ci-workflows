@@ -50,6 +50,14 @@ on:
         description: 'Override preview deploy script (default: auto by project_type, targets --env preview)'
         type: string
         default: ''
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        description: >-
+          Cloudflare API token for wrangler deploy. Same-org caller can pass
+          via `secrets: inherit`; cross-org caller (e.g. ohishi-exp/*) must
+          declare it here to pass it explicitly (`secrets: inherit` does not
+          cross org boundaries, matching frontend-ci.yml's pattern).
+        required: false
 
 jobs:
   deploy-preview:
