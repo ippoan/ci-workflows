@@ -1291,6 +1291,7 @@ jobs:
           # wrangler は "Version ID:" / "Worker Version ID:" を出す。
           VID=$(printf '%s' "$OUT" | grep -oiE 'Version ID:[[:space:]]+[0-9a-f-]+' | tail -1 | awk '{print $NF}')
           echo "uploaded_version_id=${VID:-}" >> "$GITHUB_OUTPUT"
+          echo "no_traffic_upload=${NO_TRAFFIC_UPLOAD}" >> "$GITHUB_OUTPUT"
 
           # ---- pending-release report (Refs ippoan/ci-dashboard#181) ----
           # no-traffic upload した version を ci-dashboard に登録し、
@@ -1321,6 +1322,34 @@ jobs:
             -H "X-Release-Wave-Webhook-Secret: $RELEASE_WAVE_WEBHOOK_SECRET" \
             -H "Content-Type: application/json" \
             -d "$payload" || echo "::warning::pending-release report failed (best-effort)"
+
+      # ---- triggers deploy (Refs ippoan/nuxt-trouble#185) ----
+      # `wrangler versions upload` は wrangler 自身が deploy 出力で明示的に警告する
+      # 通り、triggers (routes / custom domains / cron schedules 等) を一切
+      # Cloudflare に反映しない ("Changes to triggers ... must be applied with
+      # the command `wrangler triggers deploy`")。release_no_traffic (default
+      # true) が全 frontend 共通の既定挙動になって以降このコマンドを一度も挟んで
+      # いなかったため、wrangler.toml の custom domain 設定が Cloudflare 側と
+      # 乖離したまま気付かれず、production の custom domain が反映されない事故が
+      # 起きた (nuxt-trouble#185)。no-traffic upload した回は必ずこのステップで
+      # triggers も明示的に同期する。
+      - name: Deploy triggers (routes/custom domains/cron)
+        if: >-
+          inputs.has_deploy && startsWith(github.ref, 'refs/tags/v') &&
+          github.event_name == 'push' &&
+          steps.deploy.outputs.no_traffic_upload == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 複数 named environment を持つ config で --env 未指定だと wrangler が
+          # 対話確認を求める (release-wave-handler の flip と同じ対策)。
+          # top-level (production) 環境を明示するため空文字を渡す。
+          ENV_FLAG=()
+          if ls wrangler.toml wrangler.jsonc wrangler.json >/dev/null 2>&1; then
+            ENV_FLAG=(--env=)
+          fi
+          npx wrangler triggers deploy "${ENV_FLAG[@]}"
 
       # ---- traffic-report (Refs ippoan/ci-dashboard#137) ----
       # deploy 後の worker version traffic split を ci-dashboard に報告し、
