@@ -220,37 +220,19 @@ jobs:
         run: sccache --show-stats || true
 
       # -------- TS / JS --------
-      # actions/setup-node の built-in `cache: npm` を使う。lockfile (package-lock.json)
-      # が無い repo (例: library 配布で lockfile を commit しない mcp-cf-workers) では
-      # setup-node が `Some specified paths were not resolved, unable to cache
-      # dependencies` で hard fail するため、lockfile 不在時は cache を skip する
-      # (Refs ippoan/cap-catalog#32 #3)。lockfile 不在 = cache 無効、で setup-node
-      # 自体は通す。
-      - name: Detect npm lockfile (ts/js)
+      # extractor (Refs ippoan/cap-catalog#5) は未実装で npm install を一切
+      # 行わないため npm cache を持たせる意味が無い。それどころか有害だった:
+      # setup-node の npm cache キーは `node-cache-<os>-npm-<lockfileのhash>` で
+      # working_directory やワークフロー名を含まないため、同じ repo 内で同じ
+      # lockfile を参照する test.yml / preview-deploy.yml と**キーが衝突**する。
+      # この job は npm install しないまま真っ先に完走し、cache miss のたびに
+      # ほぼ空の ~/.npm を save if してしまい、以後 install する側のジョブが
+      # 常にこの空キャッシュを踏んで npm install の高速化が効かなくなっていた
+      # (実害: ohishi-exp/nuxt-dtako-admin#134 調査で発覚、cache hit はするが
+      # 実体は ~0 byte)。extractor が npm install するようになるまで cache は
+      # 持たせない。
+      - name: Setup Node
         if: inputs.language == 'ts' || inputs.language == 'js'
-        id: npm_lockfile
-        env:
-          WORKING_DIR: ${{ inputs.working_directory }}
-        run: |
-          set -euo pipefail
-          if [ -f "$WORKING_DIR/package-lock.json" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "npm lockfile found at $WORKING_DIR/package-lock.json"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::no package-lock.json at $WORKING_DIR — setup-node will skip npm cache"
-          fi
-
-      - name: Setup Node (with npm cache)
-        if: (inputs.language == 'ts' || inputs.language == 'js') && steps.npm_lockfile.outputs.exists == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node_version }}
-          cache: 'npm'
-          cache-dependency-path: ${{ inputs.working_directory }}/package-lock.json
-
-      - name: Setup Node (no cache, lockfile missing)
-        if: (inputs.language == 'ts' || inputs.language == 'js') && steps.npm_lockfile.outputs.exists == 'false'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}

@@ -431,7 +431,7 @@ reusable input `release_wave_gcp_base_url` で release-wave-gcp の URL を
 - **shared-key**: default `<caller-repo>-catalog-<language>`。caller の `shared_key` input で override 可。release reusable と key 衝突しないよう suffix で分離。
 - **`save-if: github.event_name == 'push' && refs/heads/main` のみ** (= 非対称 save-if)。PR run は restore のみ、中途半端な target/ が main の cache を上書きしない。
 - **Rust**: `Swatinem/rust-cache@v2` (target/) + `mozilla-actions/sccache-action@v0.0.9` (compiler input) の 2 段。`cache-targets: false` で rust-cache と sccache の責務を分ける。
-- **TS/JS**: `actions/setup-node@v4` 内蔵 `cache: 'npm'` (`cache-dependency-path` は `<working_directory>/package-lock.json` 固定)。
+- **TS/JS**: **cache 無し** (`actions/setup-node@v4` を cache 指定なしで実行)。extractor 未実装で npm install しないため、cache を持たせると working_directory/workflow 名を含まない npm cache key (lockfile hash のみ) が同 repo の test.yml / preview-deploy.yml と衝突し、ほぼ空の cache で汚染してしまっていた (実害: ohishi-exp/nuxt-dtako-admin#134)。extractor が npm install するようになったら復活を検討する。
 - **Go**: `actions/setup-go@v5` 内蔵 `cache: true` (`cache-dependency-path` は `<working_directory>/go.sum` 固定)。
 
 #### Caller テンプレート
