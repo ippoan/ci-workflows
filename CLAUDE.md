@@ -285,6 +285,32 @@ jobs:
 
 `NODE_AUTH_TOKEN` は同 org 内 publish なら `${{ secrets.GITHUB_TOKEN }}` で足りる。 npmjs.org publish に切り替える場合は granular npm access token を caller secret として渡す + `registry_url: 'https://registry.npmjs.org'` も合わせて override。
 
+### rust-dep-check.yml
+
+Rust の依存グラフ監視 reusable。`dep-check` 1 job で以下を実行する
+(Refs ippoan/rust-alc-api の `docs/ci-performance.md`「依存グラフ削減」):
+
+- **cargo-deny `check bans`** — 同一 crate の複数バージョン共存を警告/失敗。
+  設定は caller repo の `deny.toml` (`[bans] multiple-versions = "warn"` 等) が
+  SoT。**deny.toml が無い repo は notice のみで skip** (段階導入可能)
+- **cargo-machete** — 未使用依存の検出 (text ベース・コンパイル不要で数秒)。
+  `machete_enforce: 'warn'` (default) は `::warning::` のみで job は緑、
+  `'fail'` で job fail。proc-macro / build script 経由のみの利用は false
+  positive になるため caller の `Cargo.toml` に
+  `[package.metadata.cargo-machete] ignored = ["crate-name"]` で除外する
+
+```yaml
+# Caller (bespoke ci.yml の 1 job として)
+  dep-check:
+    uses: ippoan/ci-workflows/.github/workflows/rust-dep-check.yml@main
+    # with:
+    #   working_directory: '.'
+    #   machete_enforce: 'warn'   # warn | fail
+```
+
+実例: `ippoan/rust-alc-api` の `ci.yml` (rust-s3 の旧 hyper スタック二重等、
+既知重複の解消追跡に使用)。
+
 ### auto-merge.yml
 
 CI 完走後に `gh pr merge --auto --squash` を queue する reusable。frontend-ci.yml / lib-ci.yml には embed 済み、go-ci.yml caller や bespoke ci.yml の repo は caller 側で `needs:` を組んで呼ぶ。

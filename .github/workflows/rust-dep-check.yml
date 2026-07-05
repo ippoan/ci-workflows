@@ -1,0 +1,79 @@
+name: rust-dep-check
+
+# Rust の依存グラフ監視 reusable (Refs ippoan/rust-alc-api の docs/ci-performance.md):
+#
+#   - cargo-deny `check bans` — 同一 crate の複数バージョン共存 (重複依存) を
+#     警告/失敗させる。caller repo の deny.toml ([bans] multiple-versions =
+#     "warn" 等) が設定の SoT。deny.toml が無い repo では notice を出して
+#     skip する (fail しない = 段階導入可能)。
+#   - cargo-machete — 未使用依存の検出。text ベースでコンパイル不要 (数秒)。
+#     machete_enforce: 'warn' (default) は ::warning:: のみで job は緑、
+#     'fail' で job fail。proc-macro / build script 経由のみで使う crate は
+#     false positive になるため、caller の Cargo.toml に
+#     [package.metadata.cargo-machete] ignored = ["crate-name"] で除外する。
+#
+# Caller テンプレート:
+#   dep-check:
+#     uses: ippoan/ci-workflows/.github/workflows/rust-dep-check.yml@main
+#     # with:
+#     #   working_directory: '.'
+#     #   machete_enforce: 'warn'   # warn | fail
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: 'cargo コマンドの作業ディレクトリ (default: repo root)'
+        type: string
+        required: false
+        default: '.'
+      machete_enforce:
+        description: "cargo-machete が未使用依存を検出した時の挙動: 'warn' | 'fail'"
+        type: string
+        required: false
+        default: 'warn'
+
+permissions:
+  contents: read
+
+jobs:
+  dep-check:
+    name: dep-check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-machete
+
+      - name: cargo-deny (duplicate versions / bans)
+        run: |
+          if [ ! -f deny.toml ]; then
+            echo "::notice::deny.toml が無いため cargo-deny を skip (repo root に deny.toml を置くと有効化)"
+            exit 0
+          fi
+          cargo deny check bans
+
+      - name: cargo-machete (unused deps)
+        env:
+          MACHETE_ENFORCE: ${{ inputs.machete_enforce }}
+        run: |
+          code=0
+          cargo machete || code=$?
+          if [ "$code" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "$code" -eq 1 ]; then
+            msg="未使用依存が検出されました (cargo machete)。不要なら削除、proc-macro 等の false positive は [package.metadata.cargo-machete] ignored に登録"
+            if [ "$MACHETE_ENFORCE" = "fail" ]; then
+              echo "::error::$msg"
+              exit 1
+            fi
+            echo "::warning::$msg"
+            exit 0
+          fi
+          exit "$code"
