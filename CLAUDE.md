@@ -152,6 +152,7 @@ jobs:
 | `deploy_staging_script` | `''` | staging デプロイスクリプト |
 | `staging_build_secret_name` | `''` | Deploy to staging に caller secret を 1 つ env として渡す opt-in (staging 専用、release には配線しない)。`staging_build_env_name` とペアで使う |
 | `staging_build_env_name` | `''` | 上記 secret を export する環境変数名 (`[A-Za-z_][A-Za-z0-9_]*`) |
+| `staging_no_traffic` | `false` | staging deploy を `deploy-staging-upload` (build/upload、needs 無しで test 群と並列) + `deploy-staging-flip` (`wrangler versions deploy <id>@100% --env staging`、test 群 + upload が全部 green になった瞬間に自動 flip、人の承認は挟まない) の2 job に分ける。`false` (default) は従来どおり単一 job で build 後に即 100% deploy (test 群完了を待ってから build するので upload/flip の分割自体が発生しない) |
 | `deploy_release_script` | `''` | リリースデプロイスクリプト |
 | `npm_publish_directory` | `''` | npm パッケージディレクトリ (設定時に publish 有効)。**comma-separated 対応** — `'packages/auth-client,packages/auth-client-worker'` のように複数 path 指定で全 package を 1 回の CI で publish。dev publish 版は全 package が `0.0.<PR>-dev.<SHA>` 共通、release tag publish は tag バージョン共通 (lock-step、独立 versioning 不可) |
 | `npm_publish_name` | `''` | npm パッケージ名 (propagation 用、例: `@ippoan/auth-client`) |
@@ -378,6 +379,12 @@ Secrets: Read and write`、secret は `secrets-inventory` MCP の `sync_from_gcp
 > **2026-07 更新**: frontend-ci.yml の `secret-verify` は **test/typecheck/integration と並列**に変更した (needs を撤去)。直列だと毎 PR ~30s の wall time を deploy-staging / auto-merge の手前に足していたため。上記 3. (赤 commit で Secret Manager を叩く quota 浪費) は verify が数 call であることから許容した。「deploy 前に test と secret-verify の両方が green」というガードは deploy-staging / auto-merge job の needs + result 条件が引き続き担保する。go-ci.yml の secret-verify は従来どおり (caller が DAG を組むため)。
 >
 > 同時に `test` / `typecheck` / `integration-test` の `needs: [pr-limit]` も撤去した。`pr-limit` (同一 author の他 PR の merge conflict チェック、今回の diff とは無関係な metadata check) が test 群を待たせる理由が無く、deploy-staging / auto-merge の `needs` にも `pr-limit` は含まれていない (元々 merge gate ではなかった) ため、純粋な視覚上の直列 (~7s) を解消して全 job を run 開始と同時に並列実行するようにした。
+>
+> **さらに `deploy-staging` を `deploy-staging-upload` + `deploy-staging-flip` の2 job に分割**し、`staging_no_traffic` (default `false`、opt-in) を追加した。従来は `deploy-staging` が test 群の完了を待ってから build していたため、build (nuxt で ~30〜60s) が並列化の恩恵を受けられずクリティカルパスに残っていた。`staging_no_traffic: true` にすると:
+> - `deploy-staging-upload` (needs 無し、run 開始と同時に test 群と並列実行) が `wrangler deploy` → `wrangler versions upload` (no-traffic、release_no_traffic と同じ置換) で build+upload だけ済ませる (traffic は動かないので test 結果を待たずに実行して安全)
+> - `deploy-staging-flip` (needs: upload + test 群全部) が test 群と upload が両方 green になった瞬間に `wrangler versions deploy <id>@100% --env staging --yes` で自動 flip する。**人の承認 (GitHub Environment required reviewer 等) は挟まない** — gate は既存の test/typecheck/... の green 条件のみ
+>
+> クリティカルパスが `test群完了 + build時間` (直列) から `max(test群, build)+flip時間` (並列) に短縮される。`false` (default) は今までどおり単一 job (`deploy-staging-upload` が build から即 100% deploy まで完結、`deploy-staging-flip` は常に skip)。
 
 ### release-wave-handler.yml
 

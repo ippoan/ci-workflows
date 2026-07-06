@@ -127,6 +127,20 @@ on:
         description: Whether to run staging deploy (overrides has_deploy for staging only)
         type: boolean
         default: true
+      staging_no_traffic:
+        description: >-
+          true にすると staging deploy を「build/upload (test 群と並列、needs
+          無し) → 全 gate green で自動 flip (deploy-staging-flip job)」の2段に
+          分ける。release_no_traffic と同じ `wrangler deploy` →
+          `wrangler versions upload` 置換で upload し、flip は
+          `wrangler versions deploy <id>@100% --env staging` を自動実行する
+          (人の承認は挟まない、gate は既存の test/typecheck/... 条件のみ)。
+          目的は速度: 従来は staging deploy の build が test 群の完了を待って
+          いたが、build/upload 自体は traffic に影響しないため即並列実行できる。
+          既定 false (既存の「test 完了後に即 100% deploy」を維持、breaking
+          change なし)。
+        type: boolean
+        default: false
       npm_publish_directory:
         description: |
           Directory of npm package(s) to publish. Accepts a single path
@@ -1275,22 +1289,21 @@ jobs:
       service_account: ${{ inputs.gcp_secret_verify_sa != '' && inputs.gcp_secret_verify_sa || vars.GCP_WIF_SERVICE_ACCOUNT_STAGING }}
       apply_labels: ${{ inputs.gcp_secret_verify_apply_labels }}
 
-  deploy-staging:
-    name: Deploy Staging
-    needs: [test, typecheck, integration-test, branch-protection, secret-verify-required, secret-verify]
+  deploy-staging-upload:
+    name: Deploy Staging (upload)
+    # staging_no_traffic の有無に関わらず needs 無し = run 開始と同時に build/
+    # upload を始める。false の時はこの job が今までどおり「build して即
+    # 100% deploy」まで完結する (deploy-staging-flip は skip)。true の時は
+    # ここでは traffic を一切動かさない (no-traffic upload のみ) ので、
+    # test 群の結果を待たずに走らせても安全。
     if: >-
-      always() &&
       inputs.has_deploy &&
       inputs.has_staging_deploy &&
       github.event_name == 'pull_request' &&
-      github.event.pull_request.draft == false &&
-      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
-      needs.typecheck.result == 'success' &&
-      (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
-      (needs.branch-protection.result == 'success' || needs.branch-protection.result == 'skipped') &&
-      (needs.secret-verify-required.result == 'success' || needs.secret-verify-required.result == 'skipped') &&
-      (needs.secret-verify.result == 'success' || needs.secret-verify.result == 'skipped')
+      github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    outputs:
+      version_id: ${{ steps.deploy.outputs.version_id }}
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
@@ -1367,12 +1380,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Deploy to staging
+        id: deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           # opt-in: caller secret を 1 つだけ build/deploy の env に渡す
           # (式の短絡評価により name 未指定時は secrets を参照しない)
           STAGING_BUILD_SECRET: ${{ inputs.staging_build_secret_name != '' && secrets[inputs.staging_build_secret_name] || '' }}
           STAGING_BUILD_ENV_NAME: ${{ inputs.staging_build_env_name }}
+          STAGING_NO_TRAFFIC: ${{ inputs.staging_no_traffic }}
         run: |
           if [ -n "$STAGING_BUILD_ENV_NAME" ] && [ -n "$STAGING_BUILD_SECRET" ]; then
             if ! printf '%s' "$STAGING_BUILD_ENV_NAME" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$'; then
@@ -1389,7 +1404,90 @@ jobs:
               CMD="npm run build && npx wrangler deploy --env staging"
             fi
           fi
-          eval "$CMD"
+
+          # staging_no_traffic=false (default) は従来どおり即 100% deploy。
+          # true の場合のみ `wrangler deploy` を `wrangler versions upload`
+          # (no-traffic) に置換し、生成された version id を後続の
+          # deploy-staging-flip job へ output で渡す (release_no_traffic と
+          # 同じ置換パターン)。
+          if [ "$STAGING_NO_TRAFFIC" != "true" ]; then
+            eval "$CMD"
+            exit 0
+          fi
+
+          if printf '%s' "$CMD" | grep -q 'wrangler deploy'; then
+            CMD="${CMD//wrangler deploy/wrangler versions upload}"
+          elif printf '%s' "$CMD" | grep -q 'wrangler versions upload'; then
+            : # 既に no-traffic — そのまま
+          else
+            echo "::error::staging_no_traffic=true だが deploy_staging_script に 'wrangler deploy' / 'wrangler versions upload' が無く no-traffic を保証できません。"
+            echo "::error::script: $CMD"
+            exit 1
+          fi
+          echo "staging upload: $CMD"
+          set +e
+          OUT=$(eval "$CMD" 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "$OUT"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::staging upload failed (rc=$rc) — 上の出力を参照"
+            exit "$rc"
+          fi
+          VID=$(printf '%s' "$OUT" | grep -oiE 'Version ID:[[:space:]]+[0-9a-f-]+' | tail -1 | awk '{print $NF}')
+          if [ -z "$VID" ]; then
+            echo "::error::wrangler 出力から Version ID を抽出できませんでした (flip 不可能)"
+            exit 1
+          fi
+          echo "version_id=${VID}" >> "$GITHUB_OUTPUT"
+
+  deploy-staging-flip:
+    name: Deploy Staging (flip)
+    # staging_no_traffic=false の時はここで何もすることが無い (upload job が
+    # 既に 100% deploy 済み) ので常に skip する。true の時だけ、build/upload
+    # と並行して走っていた test 群が全部 green になった瞬間に自動で 100%
+    # flip する (人の承認は挟まない)。
+    needs: [deploy-staging-upload, test, typecheck, integration-test, branch-protection, secret-verify-required, secret-verify]
+    if: >-
+      always() &&
+      inputs.staging_no_traffic &&
+      inputs.has_deploy &&
+      inputs.has_staging_deploy &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
+      needs.deploy-staging-upload.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      needs.typecheck.result == 'success' &&
+      (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
+      (needs.branch-protection.result == 'success' || needs.branch-protection.result == 'skipped') &&
+      (needs.secret-verify-required.result == 'success' || needs.secret-verify-required.result == 'skipped') &&
+      (needs.secret-verify.result == 'success' || needs.secret-verify.result == 'skipped')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      # 軽量: node_modules フル install はしない。wrangler CLI だけ npx が
+      # 都度解決する (flip は build を含まない単純な API 呼び出しなので、
+      # 「build/upload は並列で先に終わっている」という設計上の速さを
+      # ここでの重い install で相殺しないため)。
+      - name: Flip staging traffic to uploaded version
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          VID: ${{ needs.deploy-staging-upload.outputs.version_id }}
+        run: |
+          if [ -z "$VID" ]; then
+            echo "::error::deploy-staging-upload が version_id を出力していません (flip 不可能)"
+            exit 1
+          fi
+          echo "flipping 100% traffic to $VID"
+          npx wrangler versions deploy "${VID}@100%" --env staging --yes
 
   deploy-release:
     name: Deploy Release
@@ -1855,7 +1953,7 @@ jobs:
 
   auto-merge:
     name: Auto Merge
-    needs: [test, typecheck, integration-test, branch-protection, secret-verify-required, secret-verify, deploy-staging]
+    needs: [test, typecheck, integration-test, branch-protection, secret-verify-required, secret-verify, deploy-staging-upload, deploy-staging-flip]
     if: >-
       always() &&
       github.event_name == 'pull_request' &&
@@ -1866,7 +1964,8 @@ jobs:
       (needs.branch-protection.result == 'success' || needs.branch-protection.result == 'skipped') &&
       (needs.secret-verify-required.result == 'success' || needs.secret-verify-required.result == 'skipped') &&
       (needs.secret-verify.result == 'success' || needs.secret-verify.result == 'skipped') &&
-      (needs.deploy-staging.result == 'success' || needs.deploy-staging.result == 'skipped')
+      (needs.deploy-staging-upload.result == 'success' || needs.deploy-staging-upload.result == 'skipped') &&
+      (needs.deploy-staging-flip.result == 'success' || needs.deploy-staging-flip.result == 'skipped')
     uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
     permissions:
       contents: write
