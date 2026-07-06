@@ -517,11 +517,23 @@ jobs:
       # namespace して #134 の空 cache 衝突 (lockfile hash のみ key が同 repo の
       # 別 workflow と衝突) を防ぐ。cache_dependency_path 未設定 caller は
       # working_directory/package-lock.json に fallback (constant key 化を回避)。
+      #
+      # hash は checkout 直後・install 前にここで 1 回だけ計算し、restore/save
+      # 両方でこの step output を参照する。install_command が `npm ci` でなく
+      # `npm install` の caller (このリポジトリの標準) では、install 中に
+      # package-lock.json が書き換わることがあり、restore 時点 (pristine) と
+      # save 時点 (install 後) で hashFiles() を毎回評価すると値が食い違う。
+      # 食い違うと save が常に「別キー」で書き込まれ、次回の restore が
+      # 恒久的に外れ続ける (実機で 3 run 連続 miss を確認、原因究明済み)。
+      - name: Compute node_modules cache key
+        id: nm-cache-key
+        run: echo "hash=${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}" >> "$GITHUB_OUTPUT"
+
       - name: Restore node_modules (warm from default branch)
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
-          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ steps.nm-cache-key.outputs.hash }}
 
       - name: Install dependencies
         run: ${{ inputs.install_command }}
@@ -542,7 +554,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
-          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ steps.nm-cache-key.outputs.hash }}
 
       - name: Use auth-client dev
         if: inputs.use_auth_client_dev
@@ -754,11 +766,23 @@ jobs:
       # namespace して #134 の空 cache 衝突 (lockfile hash のみ key が同 repo の
       # 別 workflow と衝突) を防ぐ。cache_dependency_path 未設定 caller は
       # working_directory/package-lock.json に fallback (constant key 化を回避)。
+      #
+      # hash は checkout 直後・install 前にここで 1 回だけ計算し、restore/save
+      # 両方でこの step output を参照する。install_command が `npm ci` でなく
+      # `npm install` の caller (このリポジトリの標準) では、install 中に
+      # package-lock.json が書き換わることがあり、restore 時点 (pristine) と
+      # save 時点 (install 後) で hashFiles() を毎回評価すると値が食い違う。
+      # 食い違うと save が常に「別キー」で書き込まれ、次回の restore が
+      # 恒久的に外れ続ける (実機で 3 run 連続 miss を確認、原因究明済み)。
+      - name: Compute node_modules cache key
+        id: nm-cache-key
+        run: echo "hash=${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}" >> "$GITHUB_OUTPUT"
+
       - name: Restore node_modules (warm from default branch)
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
-          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ steps.nm-cache-key.outputs.hash }}
 
       - name: Install dependencies
         run: ${{ inputs.install_command }}
@@ -779,7 +803,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
-          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ steps.nm-cache-key.outputs.hash }}
 
       - name: Use auth-client dev
         if: inputs.use_auth_client_dev
@@ -852,11 +876,23 @@ jobs:
       # namespace して #134 の空 cache 衝突 (lockfile hash のみ key が同 repo の
       # 別 workflow と衝突) を防ぐ。cache_dependency_path 未設定 caller は
       # working_directory/package-lock.json に fallback (constant key 化を回避)。
+      #
+      # hash は checkout 直後・install 前にここで 1 回だけ計算し、restore/save
+      # 両方でこの step output を参照する。install_command が `npm ci` でなく
+      # `npm install` の caller (このリポジトリの標準) では、install 中に
+      # package-lock.json が書き換わることがあり、restore 時点 (pristine) と
+      # save 時点 (install 後) で hashFiles() を毎回評価すると値が食い違う。
+      # 食い違うと save が常に「別キー」で書き込まれ、次回の restore が
+      # 恒久的に外れ続ける (実機で 3 run 連続 miss を確認、原因究明済み)。
+      - name: Compute node_modules cache key
+        id: nm-cache-key
+        run: echo "hash=${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}" >> "$GITHUB_OUTPUT"
+
       - name: Restore node_modules (warm from default branch)
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
-          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ steps.nm-cache-key.outputs.hash }}
 
       - name: Install dependencies
         run: ${{ inputs.install_command }}
@@ -877,7 +913,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
-          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ steps.nm-cache-key.outputs.hash }}
 
       - name: Use auth-client dev
         if: inputs.use_auth_client_dev
@@ -1217,11 +1253,23 @@ jobs:
       # namespace して #134 の空 cache 衝突 (lockfile hash のみ key が同 repo の
       # 別 workflow と衝突) を防ぐ。cache_dependency_path 未設定 caller は
       # working_directory/package-lock.json に fallback (constant key 化を回避)。
+      #
+      # hash は checkout 直後・install 前にここで 1 回だけ計算し、restore/save
+      # 両方でこの step output を参照する。install_command が `npm ci` でなく
+      # `npm install` の caller (このリポジトリの標準) では、install 中に
+      # package-lock.json が書き換わることがあり、restore 時点 (pristine) と
+      # save 時点 (install 後) で hashFiles() を毎回評価すると値が食い違う。
+      # 食い違うと save が常に「別キー」で書き込まれ、次回の restore が
+      # 恒久的に外れ続ける (実機で 3 run 連続 miss を確認、原因究明済み)。
+      - name: Compute node_modules cache key
+        id: nm-cache-key
+        run: echo "hash=${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}" >> "$GITHUB_OUTPUT"
+
       - name: Restore node_modules (warm from default branch)
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
-          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ steps.nm-cache-key.outputs.hash }}
 
       - name: Install dependencies
         run: ${{ inputs.install_command }}
@@ -1242,7 +1290,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
-          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ steps.nm-cache-key.outputs.hash }}
 
       - name: Use auth-client dev
         if: inputs.use_auth_client_dev
@@ -1316,11 +1364,23 @@ jobs:
       # namespace して #134 の空 cache 衝突 (lockfile hash のみ key が同 repo の
       # 別 workflow と衝突) を防ぐ。cache_dependency_path 未設定 caller は
       # working_directory/package-lock.json に fallback (constant key 化を回避)。
+      #
+      # hash は checkout 直後・install 前にここで 1 回だけ計算し、restore/save
+      # 両方でこの step output を参照する。install_command が `npm ci` でなく
+      # `npm install` の caller (このリポジトリの標準) では、install 中に
+      # package-lock.json が書き換わることがあり、restore 時点 (pristine) と
+      # save 時点 (install 後) で hashFiles() を毎回評価すると値が食い違う。
+      # 食い違うと save が常に「別キー」で書き込まれ、次回の restore が
+      # 恒久的に外れ続ける (実機で 3 run 連続 miss を確認、原因究明済み)。
+      - name: Compute node_modules cache key
+        id: nm-cache-key
+        run: echo "hash=${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}" >> "$GITHUB_OUTPUT"
+
       - name: Restore node_modules (warm from default branch)
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
-          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ steps.nm-cache-key.outputs.hash }}
 
       - name: Install dependencies
         run: ${{ inputs.install_command }}
@@ -1341,7 +1401,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
-          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ steps.nm-cache-key.outputs.hash }}
 
       - name: Use auth-client dev
         if: inputs.use_auth_client_dev
