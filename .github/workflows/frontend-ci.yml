@@ -1189,19 +1189,16 @@ jobs:
 
   secret-verify:
     name: secret-verify
-    # `always()` で needs 中の `skipped` (例: has_integration=false の
-    # integration-test) を許容する。これが無いと GitHub Actions の default
-    # 動作で needs に skip が混ざった瞬間 dependency-skip cascade で本 job
-    # も skipped になり、`if:` 評価すらされず verify が動かない。
+    # test/typecheck/integration とは意図的に並列 (needs 無し)。旧配線は
+    # test 群の後ろに直列で、毎 PR ~30s の wall time を deploy-staging /
+    # auto-merge の手前に足していた。verify は Secret Manager への数 call
+    # なので、赤い commit でも走ることによる quota 消費は無視できる。
+    # 「deploy 前に test と secret-verify の両方が green」というガードは
+    # deploy-staging / auto-merge の needs + result 条件が引き続き担保する。
     if: >-
-      always() &&
-      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
-      needs.typecheck.result == 'success' &&
-      (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
       (inputs.gcp_secret_verify_project != '' || vars.GCP_PROJECT_ID_STAGING != '') &&
       (inputs.gcp_secret_verify_provider != '' || vars.GCP_WIF_PROVIDER != '') &&
       (inputs.gcp_secret_verify_sa != '' || vars.GCP_WIF_SERVICE_ACCOUNT_STAGING != '')
-    needs: [test, typecheck, integration-test]
     permissions:
       contents: read
       id-token: write
