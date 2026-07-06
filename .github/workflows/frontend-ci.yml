@@ -512,10 +512,31 @@ jobs:
         if: inputs.pre_install_script != ''
         run: ${{ inputs.pre_install_script }}
 
+      # node_modules cache: 非対称 save-if で default branch でだけ warm し、
+      # PR run は restore のみ (catalog-extract.yml と同方針)。key は workflow を
+      # namespace して #134 の空 cache 衝突 (lockfile hash のみ key が同 repo の
+      # 別 workflow と衝突) を防ぐ。cache_dependency_path 未設定 caller は
+      # working_directory/package-lock.json に fallback (constant key 化を回避)。
+      - name: Restore node_modules (warm from default branch)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ inputs.working_directory }}/node_modules
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+
       - name: Install dependencies
         run: ${{ inputs.install_command }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # save は overlay (Use auth-client dev) の前 = pristine な node_modules を
+      # cache する。restore 後も install/overlay は毎回走るので、dev dist-tag の
+      # 更新も取りこぼさない。
+      - name: Save node_modules (default branch only)
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ inputs.working_directory }}/node_modules
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
 
       - name: Use auth-client dev
         if: inputs.use_auth_client_dev
@@ -722,10 +743,31 @@ jobs:
         if: inputs.pre_install_script != ''
         run: ${{ inputs.pre_install_script }}
 
+      # node_modules cache: 非対称 save-if で default branch でだけ warm し、
+      # PR run は restore のみ (catalog-extract.yml と同方針)。key は workflow を
+      # namespace して #134 の空 cache 衝突 (lockfile hash のみ key が同 repo の
+      # 別 workflow と衝突) を防ぐ。cache_dependency_path 未設定 caller は
+      # working_directory/package-lock.json に fallback (constant key 化を回避)。
+      - name: Restore node_modules (warm from default branch)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ inputs.working_directory }}/node_modules
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+
       - name: Install dependencies
         run: ${{ inputs.install_command }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # save は overlay (Use auth-client dev) の前 = pristine な node_modules を
+      # cache する。restore 後も install/overlay は毎回走るので、dev dist-tag の
+      # 更新も取りこぼさない。
+      - name: Save node_modules (default branch only)
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ inputs.working_directory }}/node_modules
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
 
       - name: Use auth-client dev
         if: inputs.use_auth_client_dev
@@ -793,10 +835,31 @@ jobs:
         if: inputs.pre_install_script != ''
         run: ${{ inputs.pre_install_script }}
 
+      # node_modules cache: 非対称 save-if で default branch でだけ warm し、
+      # PR run は restore のみ (catalog-extract.yml と同方針)。key は workflow を
+      # namespace して #134 の空 cache 衝突 (lockfile hash のみ key が同 repo の
+      # 別 workflow と衝突) を防ぐ。cache_dependency_path 未設定 caller は
+      # working_directory/package-lock.json に fallback (constant key 化を回避)。
+      - name: Restore node_modules (warm from default branch)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ inputs.working_directory }}/node_modules
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+
       - name: Install dependencies
         run: ${{ inputs.install_command }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # save は overlay (Use auth-client dev) の前 = pristine な node_modules を
+      # cache する。restore 後も install/overlay は毎回走るので、dev dist-tag の
+      # 更新も取りこぼさない。
+      - name: Save node_modules (default branch only)
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ inputs.working_directory }}/node_modules
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
 
       - name: Use auth-client dev
         if: inputs.use_auth_client_dev
@@ -1131,10 +1194,31 @@ jobs:
         if: inputs.pre_install_script != ''
         run: ${{ inputs.pre_install_script }}
 
+      # node_modules cache: 非対称 save-if で default branch でだけ warm し、
+      # PR run は restore のみ (catalog-extract.yml と同方針)。key は workflow を
+      # namespace して #134 の空 cache 衝突 (lockfile hash のみ key が同 repo の
+      # 別 workflow と衝突) を防ぐ。cache_dependency_path 未設定 caller は
+      # working_directory/package-lock.json に fallback (constant key 化を回避)。
+      - name: Restore node_modules (warm from default branch)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ inputs.working_directory }}/node_modules
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+
       - name: Install dependencies
         run: ${{ inputs.install_command }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # save は overlay (Use auth-client dev) の前 = pristine な node_modules を
+      # cache する。restore 後も install/overlay は毎回走るので、dev dist-tag の
+      # 更新も取りこぼさない。
+      - name: Save node_modules (default branch only)
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ inputs.working_directory }}/node_modules
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
 
       - name: Use auth-client dev
         if: inputs.use_auth_client_dev
@@ -1203,10 +1287,31 @@ jobs:
         if: inputs.pre_install_script != ''
         run: ${{ inputs.pre_install_script }}
 
+      # node_modules cache: 非対称 save-if で default branch でだけ warm し、
+      # PR run は restore のみ (catalog-extract.yml と同方針)。key は workflow を
+      # namespace して #134 の空 cache 衝突 (lockfile hash のみ key が同 repo の
+      # 別 workflow と衝突) を防ぐ。cache_dependency_path 未設定 caller は
+      # working_directory/package-lock.json に fallback (constant key 化を回避)。
+      - name: Restore node_modules (warm from default branch)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ inputs.working_directory }}/node_modules
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
+
       - name: Install dependencies
         run: ${{ inputs.install_command }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # save は overlay (Use auth-client dev) の前 = pristine な node_modules を
+      # cache する。restore 後も install/overlay は毎回走るので、dev dist-tag の
+      # 更新も取りこぼさない。
+      - name: Save node_modules (default branch only)
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ inputs.working_directory }}/node_modules
+          key: nm-frontend-ci-${{ runner.os }}-n${{ inputs.node_version }}-${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}
 
       - name: Use auth-client dev
         if: inputs.use_auth_client_dev
