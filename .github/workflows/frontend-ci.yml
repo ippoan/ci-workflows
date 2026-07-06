@@ -114,6 +114,15 @@ on:
         description: Whether to run deploy jobs (controls both staging and release)
         type: boolean
         default: true
+      fast_fail:
+        description: >-
+          test / typecheck / integration-test のいずれかが fail した時に run
+          全体を cancel して兄弟 job を早期に止める (赤 run の feedback 高速化 +
+          runner 節約)。cancel には CI App token (CI_APP_ID/CI_APP_PRIVATE_KEY、
+          App に Actions:write) が必要で、無い場合は warning のみで劣化する。
+          green run の所要時間には影響しない。
+        type: boolean
+        default: true
       has_staging_deploy:
         description: Whether to run staging deploy (overrides has_deploy for staging only)
         type: boolean
@@ -736,6 +745,30 @@ jobs:
           path: ${{ inputs.working_directory }}/coverage/
           retention-days: 30
 
+      # ---- fast fail ----
+      # fail したら run 全体を cancel して走行中の兄弟 job を止める。cancel には
+      # actions:write が必要だが caller の GITHUB_TOKEN には通常無い (job の
+      # permissions に足すと未宣言 caller が startup_failure する) ため、
+      # auto-merge と同じ CI App token を mint して使う。mint 不可 / 権限不足は
+      # warning のみで劣化 (この job の fail は通常どおり伝播する)。
+      - name: Mint App token for fast fail
+        id: fast-fail-token
+        if: failure() && inputs.fast_fail
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      - name: Fast fail (cancel whole run)
+        if: failure() && inputs.fast_fail
+        continue-on-error: true
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ steps.fast-fail-token.outputs.token || github.token }}
+        run: |
+          gh run cancel "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" \
+            || echo "::warning::fast fail: run を cancel できませんでした (CI_APP_* 未設定 or App に Actions:write 権限なし)"
+
   typecheck:
     name: Type Check
     needs: [pr-limit]
@@ -829,6 +862,25 @@ jobs:
             fi
           fi
           eval "$CMD"
+
+      # ---- fast fail (test job と同じ、コメントはそちら参照) ----
+      - name: Mint App token for fast fail
+        id: fast-fail-token
+        if: failure() && inputs.fast_fail
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      - name: Fast fail (cancel whole run)
+        if: failure() && inputs.fast_fail
+        continue-on-error: true
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ steps.fast-fail-token.outputs.token || github.token }}
+        run: |
+          gh run cancel "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" \
+            || echo "::warning::fast fail: run を cancel できませんでした (CI_APP_* 未設定 or App に Actions:write 権限なし)"
 
   integration-test:
     name: API Integration
@@ -1006,6 +1058,25 @@ jobs:
       - name: Cleanup containers
         if: always()
         run: docker compose -f ${{ inputs.integration_compose_file }} down -v
+
+      # ---- fast fail (test job と同じ、コメントはそちら参照) ----
+      - name: Mint App token for fast fail
+        id: fast-fail-token
+        if: failure() && inputs.fast_fail
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      - name: Fast fail (cancel whole run)
+        if: failure() && inputs.fast_fail
+        continue-on-error: true
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ steps.fast-fail-token.outputs.token || github.token }}
+        run: |
+          gh run cancel "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" \
+            || echo "::warning::fast fail: run を cancel できませんでした (CI_APP_* 未設定 or App に Actions:write 権限なし)"
 
   # integration test が green な時、この frontend がどの backend image を相手に
   # test したかを ci-dashboard に記録する (Release Wave compatibility のデータ源)。

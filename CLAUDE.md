@@ -146,6 +146,7 @@ jobs:
 | `has_tests` | `true` | Vitest 実行するか |
 | `has_integration` | `false` | 統合テスト実行するか。**`true` にしたら `compat_backend_repo` が必須** — 未設定だと `API Integration` job が loud fail する (Release Wave compatibility edge の配線忘れ防止)。backend を相手にしない統合テストは `compat_backend_repo: 'none'` で opt-out |
 | `has_deploy` | `true` | デプロイジョブ実行するか |
+| `fast_fail` | `true` | test / typecheck / integration-test の fail 時に run 全体を cancel (赤 run の feedback 高速化、green run には無影響)。cancel は CI App token (要 Actions:write) で行い、無ければ warning のみで劣化 |
 | `npm_scope` | `''` | GitHub Packages スコープ |
 | `post_install_script` | `''` | install 後のスクリプト |
 | `deploy_staging_script` | `''` | staging デプロイスクリプト |
