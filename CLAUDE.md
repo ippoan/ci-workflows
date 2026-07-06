@@ -376,6 +376,8 @@ Secrets: Read and write`、secret は `secrets-inventory` MCP の `sync_from_gcp
 これを 2026-05 の `feat(ci): bake secret-verify into go-ci/frontend-ci` (PR #XX) で reusable 内に **直列に内製化**。caller は `gcp_secret_verify_*` 3 input を渡すだけで `ci / secret-verify` 段が動く。`secret-verify-gcp.yml` 単体 caller も維持されるので柔軟な構成は残せる。
 
 > **2026-07 更新**: frontend-ci.yml の `secret-verify` は **test/typecheck/integration と並列**に変更した (needs を撤去)。直列だと毎 PR ~30s の wall time を deploy-staging / auto-merge の手前に足していたため。上記 3. (赤 commit で Secret Manager を叩く quota 浪費) は verify が数 call であることから許容した。「deploy 前に test と secret-verify の両方が green」というガードは deploy-staging / auto-merge job の needs + result 条件が引き続き担保する。go-ci.yml の secret-verify は従来どおり (caller が DAG を組むため)。
+>
+> 同時に `test` / `typecheck` / `integration-test` の `needs: [pr-limit]` も撤去した。`pr-limit` (同一 author の他 PR の merge conflict チェック、今回の diff とは無関係な metadata check) が test 群を待たせる理由が無く、deploy-staging / auto-merge の `needs` にも `pr-limit` は含まれていない (元々 merge gate ではなかった) ため、純粋な視覚上の直列 (~7s) を解消して全 job を run 開始と同時に並列実行するようにした。
 
 ### release-wave-handler.yml
 

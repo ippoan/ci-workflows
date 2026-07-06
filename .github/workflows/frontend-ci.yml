@@ -497,11 +497,10 @@ jobs:
 
   test:
     name: Vitest + Coverage
-    needs: [pr-limit]
-    if: >-
-      always() &&
-      inputs.has_tests &&
-      (needs.pr-limit.result == 'success' || needs.pr-limit.result == 'skipped')
+    # pr-limit (同一 author の他 PR に conflict が無いかの metadata チェック、
+    # 今回の diff とは無関係) を待つ理由が無いため、needs を外して run 開始と
+    # 同時に走らせる (secret-verify と同じ並列化)。
+    if: inputs.has_tests
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -771,10 +770,7 @@ jobs:
 
   typecheck:
     name: Type Check
-    needs: [pr-limit]
-    if: >-
-      always() &&
-      (needs.pr-limit.result == 'success' || needs.pr-limit.result == 'skipped')
+    # pr-limit と並列 (test job と同じ理由、上のコメント参照)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -884,11 +880,8 @@ jobs:
 
   integration-test:
     name: API Integration
-    needs: [pr-limit]
-    if: >-
-      always() &&
-      inputs.has_integration &&
-      (needs.pr-limit.result == 'success' || needs.pr-limit.result == 'skipped')
+    # pr-limit と並列 (test job と同じ理由、上のコメント参照)
+    if: inputs.has_integration
     runs-on: ubuntu-latest
     outputs:
       # 解決した backend image SHA。report-compatibility がこれを記録するので、
