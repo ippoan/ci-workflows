@@ -531,8 +531,14 @@ jobs:
       # save は overlay (Use auth-client dev) の前 = pristine な node_modules を
       # cache する。restore 後も install/overlay は毎回走るので、dev dist-tag の
       # 更新も取りこぼさない。
-      - name: Save node_modules (default branch only)
-        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      # save は default branch push (= main warm、全 PR が restore fallback で継承) に
+      # 加えて pull_request でも実施する。node_modules は exact-lockfile key の完全な
+      # cache で、PR save は branch scope に隔離され main の cache を上書きしない
+      # (rust target/ の「中途半端な PR 成果物が main を汚す」問題が無いので
+      # catalog-extract.yml の main-only より緩めてよい)。これで PR も 2 回目以降
+      # 自前 scope から warm restore できる。
+      - name: Save node_modules (main warm + PR self-warm)
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -762,8 +768,14 @@ jobs:
       # save は overlay (Use auth-client dev) の前 = pristine な node_modules を
       # cache する。restore 後も install/overlay は毎回走るので、dev dist-tag の
       # 更新も取りこぼさない。
-      - name: Save node_modules (default branch only)
-        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      # save は default branch push (= main warm、全 PR が restore fallback で継承) に
+      # 加えて pull_request でも実施する。node_modules は exact-lockfile key の完全な
+      # cache で、PR save は branch scope に隔離され main の cache を上書きしない
+      # (rust target/ の「中途半端な PR 成果物が main を汚す」問題が無いので
+      # catalog-extract.yml の main-only より緩めてよい)。これで PR も 2 回目以降
+      # 自前 scope から warm restore できる。
+      - name: Save node_modules (main warm + PR self-warm)
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -854,8 +866,14 @@ jobs:
       # save は overlay (Use auth-client dev) の前 = pristine な node_modules を
       # cache する。restore 後も install/overlay は毎回走るので、dev dist-tag の
       # 更新も取りこぼさない。
-      - name: Save node_modules (default branch only)
-        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      # save は default branch push (= main warm、全 PR が restore fallback で継承) に
+      # 加えて pull_request でも実施する。node_modules は exact-lockfile key の完全な
+      # cache で、PR save は branch scope に隔離され main の cache を上書きしない
+      # (rust target/ の「中途半端な PR 成果物が main を汚す」問題が無いので
+      # catalog-extract.yml の main-only より緩めてよい)。これで PR も 2 回目以降
+      # 自前 scope から warm restore できる。
+      - name: Save node_modules (main warm + PR self-warm)
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -1213,8 +1231,14 @@ jobs:
       # save は overlay (Use auth-client dev) の前 = pristine な node_modules を
       # cache する。restore 後も install/overlay は毎回走るので、dev dist-tag の
       # 更新も取りこぼさない。
-      - name: Save node_modules (default branch only)
-        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      # save は default branch push (= main warm、全 PR が restore fallback で継承) に
+      # 加えて pull_request でも実施する。node_modules は exact-lockfile key の完全な
+      # cache で、PR save は branch scope に隔離され main の cache を上書きしない
+      # (rust target/ の「中途半端な PR 成果物が main を汚す」問題が無いので
+      # catalog-extract.yml の main-only より緩めてよい)。これで PR も 2 回目以降
+      # 自前 scope から warm restore できる。
+      - name: Save node_modules (main warm + PR self-warm)
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -1306,8 +1330,14 @@ jobs:
       # save は overlay (Use auth-client dev) の前 = pristine な node_modules を
       # cache する。restore 後も install/overlay は毎回走るので、dev dist-tag の
       # 更新も取りこぼさない。
-      - name: Save node_modules (default branch only)
-        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      # save は default branch push (= main warm、全 PR が restore fallback で継承) に
+      # 加えて pull_request でも実施する。node_modules は exact-lockfile key の完全な
+      # cache で、PR save は branch scope に隔離され main の cache を上書きしない
+      # (rust target/ の「中途半端な PR 成果物が main を汚す」問題が無いので
+      # catalog-extract.yml の main-only より緩めてよい)。これで PR も 2 回目以降
+      # 自前 scope から warm restore できる。
+      - name: Save node_modules (main warm + PR self-warm)
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
