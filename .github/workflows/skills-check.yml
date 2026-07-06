@@ -74,6 +74,21 @@ on:
         required: false
         type: string
         default: main
+      claude_md_size_check:
+        description: 'true (default) | false。PR で変更された CLAUDE.md が上限を超えたら job fail (CLAUDE.md ダイエット, ippoan/claude-md#90)'
+        required: false
+        type: string
+        default: 'true'
+      claude_md_max_lines:
+        description: 'CLAUDE.md の最大行数 (claude_md_size_check 用)'
+        required: false
+        type: number
+        default: 50
+      claude_md_max_chars:
+        description: 'CLAUDE.md の最大文字数 (claude_md_size_check 用)'
+        required: false
+        type: number
+        default: 2000
 
 jobs:
   map-check:
@@ -398,5 +413,87 @@ jobs:
                   fh.write(report)
 
           if findings:
+              sys.exit(1)
+          PY
+
+  claude-md-size-check:
+    name: claude-md-size-check
+    if: ${{ github.event_name == 'pull_request' && inputs.claude_md_size_check == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect changed files (PR)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git diff --name-only "$BASE_SHA"...HEAD > changed_files.txt || \
+            git diff --name-only "$BASE_SHA" HEAD > changed_files.txt
+          echo "changed $(wc -l < changed_files.txt) file(s)"
+
+      - name: Check changed CLAUDE.md size (≤lines / ≤chars)
+        env:
+          MAX_LINES: ${{ inputs.claude_md_max_lines }}
+          MAX_CHARS: ${{ inputs.claude_md_max_chars }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+
+          max_lines = int(os.environ.get("MAX_LINES", "50"))
+          max_chars = int(os.environ.get("MAX_CHARS", "2000"))
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          with open("changed_files.txt", encoding="utf-8") as fh:
+              changed = [ln.strip() for ln in fh if ln.strip()]
+
+          over, checked = [], []
+          for path in changed:
+              # basename が CLAUDE.md のもののみ / .claude 配下 (user memory 等) は除外
+              if os.path.basename(path) != "CLAUDE.md":
+                  continue
+              if "/.claude/" in path or path.startswith(".claude/"):
+                  continue
+              if not os.path.isfile(path):  # PR で削除された
+                  continue
+              with open(path, encoding="utf-8") as fh:
+                  content = fh.read()
+              if "claude-md-size-exempt" in content:
+                  checked.append((path, None, None, "exempt"))
+                  continue
+              lines = content.count("\n") + (0 if content.endswith("\n") or content == "" else 1)
+              chars = len(content)
+              status = "ok"
+              if lines > max_lines or chars > max_chars:
+                  status = "OVER"
+                  over.append((path, lines, chars))
+              checked.append((path, lines, chars, status))
+
+          for path, lines, chars in over:
+              print(f"::error file={path}::{path}: CLAUDE.md が上限超過 ({lines} 行 / {chars} 字 "
+                    f"> {max_lines} 行 / {max_chars} 字)。詳細を <repo>-map skill "
+                    f"(ippoan/claude-skills、lazy) へ退避し、CLAUDE.md には identity・条件付き"
+                    f"ポインタ・1 行 invariant だけ残してください (ダイエット規約 "
+                    f"ippoan/claude-md#90)。意図的な例外は 'claude-md-size-exempt' marker。")
+
+          report = "## skills-check (claude-md-size-check)\n\n"
+          report += f"limit: ≤{max_lines} lines / ≤{max_chars} chars（変更された CLAUDE.md のみ検査）\n\n"
+          if checked:
+              for path, lines, chars, status in checked:
+                  icon = {"ok": "✅", "OVER": "❌", "exempt": "➖"}[status]
+                  size = "exempt" if status == "exempt" else f"{lines} lines / {chars} chars"
+                  report += f"- {icon} `{path}` — {size}\n"
+          else:
+              report += "- 変更された CLAUDE.md はありません。\n"
+          print(report)
+          if summary:
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.write(report)
+
+          if over:
               sys.exit(1)
           PY
