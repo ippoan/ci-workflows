@@ -380,11 +380,16 @@ Secrets: Read and write`、secret は `secrets-inventory` MCP の `sync_from_gcp
 >
 > 同時に `test` / `typecheck` / `integration-test` の `needs: [pr-limit]` も撤去した。`pr-limit` (同一 author の他 PR の merge conflict チェック、今回の diff とは無関係な metadata check) が test 群を待たせる理由が無く、deploy-staging / auto-merge の `needs` にも `pr-limit` は含まれていない (元々 merge gate ではなかった) ため、純粋な視覚上の直列 (~7s) を解消して全 job を run 開始と同時に並列実行するようにした。
 >
-> **さらに `deploy-staging` を `deploy-staging-upload` + `deploy-staging-flip` の2 job に分割**し、`staging_no_traffic` (default `false`、opt-in) を追加した。従来は `deploy-staging` が test 群の完了を待ってから build していたため、build (nuxt で ~30〜60s) が並列化の恩恵を受けられずクリティカルパスに残っていた。`staging_no_traffic: true` にすると:
-> - `deploy-staging-upload` (needs 無し、run 開始と同時に test 群と並列実行) が `wrangler deploy` → `wrangler versions upload` (no-traffic、release_no_traffic と同じ置換) で build+upload だけ済ませる (traffic は動かないので test 結果を待たずに実行して安全)
-> - `deploy-staging-flip` (needs: upload + test 群全部) が test 群と upload が両方 green になった瞬間に `wrangler versions deploy <id>@100% --env staging --yes` で自動 flip する。**人の承認 (GitHub Environment required reviewer 等) は挟まない** — gate は既存の test/typecheck/... の green 条件のみ
+> **さらに staging deploy に `staging_no_traffic` (default `false`、opt-in) を追加**し、`true` の時だけ build/upload と flip を別 job に分ける。従来は `deploy-staging` が test 群の完了を待ってから build していたため、build (nuxt で ~30〜60s) が並列化の恩恵を受けられずクリティカルパスに残っていた。
 >
-> クリティカルパスが `test群完了 + build時間` (直列) から `max(test群, build)+flip時間` (並列) に短縮される。`false` (default) は今までどおり単一 job (`deploy-staging-upload` が build から即 100% deploy まで完結、`deploy-staging-flip` は常に skip)。
+> **`needs:` は input で条件分岐できない (job scheduling は静的 DAG)** ため、`false`/`true` を同一 job の分岐だけで両立させることはできない。3 job constant で持つ:
+> - `deploy-staging-immediate` — `false` (default) 専用。**従来の `deploy-staging` と全く同じ** (needs: test 群、test 完了を待ってから build して即 100% deploy)。既存 20+ caller はこの job がそのまま動くので無停止・no-op
+> - `deploy-staging-upload` — `true` 専用。needs 無し、run 開始と同時に test 群と並列実行。`wrangler deploy` → `wrangler versions upload` (no-traffic、release_no_traffic と同じ置換) で build+upload だけ済ませる (traffic は動かないので test 結果を待たずに実行して安全)
+> - `deploy-staging-flip` — `true` 専用。needs: upload + test 群全部。全部 green になった瞬間に `wrangler versions deploy <id>@100% --env staging --yes` で自動 flip する。**人の承認 (GitHub Environment required reviewer 等) は挟まない** — gate は既存の test/typecheck/... の green 条件のみ
+>
+> `true` の時はクリティカルパスが `test群完了 + build時間` (直列) から `max(test群, build)+flip時間` (並列) に短縮される。`auto-merge` の `needs` はこの3 job 全部を含み、非活性側は `skipped` として扱う。
+>
+> **2026-07 の実装ミスと即時修正の記録**: 初版 PR (#159) では `deploy-staging-upload` 1 job だけで `false`/`true` 両方を賄おうとし、**`needs` を丸ごと削除した結果 `false` (default = 全 caller) でも test 完了を待たずに即 100% deploy してしまう重大な回帰**が発生した (自動セキュリティレビューが検出、merge から数分で発覚・#160 で修正)。「build/upload 自体は無害」という判断は `staging_no_traffic=true` の no-traffic upload に限った話で、`false` の実体 (即 `wrangler deploy`) には適用できないことを見落としていた。同種の「安全な最適化のつもりで gate を丸ごと外す」変更をする時は、**gate 対象のコマンドが input 次第で変わる場合、job を分けずに `if:` だけで済まそうとしない**こと。
 
 ### release-wave-handler.yml
 
