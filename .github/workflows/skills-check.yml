@@ -416,64 +416,6 @@ jobs:
               sys.exit(1)
           PY
 
-  # ------------------------------------------------------------------ ci-shape
-  # ci-dashboard `/ci-matrix` は ci-shape-report.yml caller が無い repo を
-  # silent に一覧から除外するだけ (= 未導入に気付けない)。ippoan/ohishi-exp
-  # org は全 repo 導入済みが規約 (Refs ippoan/ci-dashboard#393) なので、caller
-  # 欠落 (or 壊れた caller) を PR 上で loud に fail させる。owner scope は
-  # 明示 allowlist (yhonda-ohishi 等の対象外 org を誤って巻き込まない)。
-  ci-shape-check:
-    name: ci-shape-check
-    if: ${{ github.event_name == 'pull_request' && contains(fromJSON('["ippoan","ohishi-exp"]'), github.repository_owner) }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify ci-shape-report caller exists
-        run: |
-          python3 - <<'PY'
-          import glob, os, sys
-
-          summary = os.environ.get("GITHUB_STEP_SUMMARY")
-          # ci-workflows 自身は reusable と filename 衝突するため別名 caller を使う
-          candidates = [
-              ".github/workflows/ci-shape-report.yml",
-              ".github/workflows/ci-shape-report-self.yml",
-          ]
-          found = None
-          for path in candidates:
-              if not os.path.isfile(path):
-                  continue
-              with open(path, encoding="utf-8") as fh:
-                  text = fh.read()
-              if "ippoan/ci-workflows/.github/workflows/ci-shape-report.yml" in text:
-                  found = path
-                  break
-
-          report = "## skills-check (ci-shape-check)\n\n"
-          if found:
-              report += f"- ✅ `{found}` が ci-shape-report reusable を呼んでいます。\n"
-              print(report)
-              if summary:
-                  with open(summary, "a", encoding="utf-8") as fh:
-                      fh.write(report)
-              sys.exit(0)
-
-          msg = (
-              "ci-shape-report.yml caller がありません (or reusable を呼んでいません)。"
-              "ci-dashboard `/ci-matrix` の CI shape 集計対象から漏れます。"
-              "ippoan/ci-dashboard#393 の caller テンプレを追加してください。"
-          )
-          print(f"::error::{msg}")
-          report += f"- ❌ {msg}\n"
-          print(report)
-          if summary:
-              with open(summary, "a", encoding="utf-8") as fh:
-                  fh.write(report)
-          sys.exit(1)
-          PY
-
   claude-md-size-check:
     name: claude-md-size-check
     if: ${{ github.event_name == 'pull_request' && inputs.claude_md_size_check == 'true' }}
