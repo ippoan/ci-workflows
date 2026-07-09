@@ -141,6 +141,15 @@ on:
           change なし)。
         type: boolean
         default: false
+      deploy_staging_on_draft:
+        description: >-
+          true にすると draft PR でも staging deploy を実行する。既定は
+          `draft == false` gate で draft PR は staging に反映しない (org 標準:
+          draft = レビュー前 = 未 deploy)。draft レビュー中に実機確認したい
+          特定 repo だけ opt-in する用途 (共有 staging を branch ごとに上書き
+          する副作用を許容できる repo のみ)。既定 false (既存挙動を維持)。
+        type: boolean
+        default: false
       npm_publish_directory:
         description: |
           Directory of npm package(s) to publish. Accepts a single path
@@ -1306,7 +1315,7 @@ jobs:
       inputs.has_deploy &&
       inputs.has_staging_deploy &&
       github.event_name == 'pull_request' &&
-      github.event.pull_request.draft == false &&
+      (github.event.pull_request.draft == false || inputs.deploy_staging_on_draft) &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success' &&
       (needs.integration-test.result == 'success' || needs.integration-test.result == 'skipped') &&
@@ -1401,7 +1410,7 @@ jobs:
       inputs.has_deploy &&
       inputs.has_staging_deploy &&
       github.event_name == 'pull_request' &&
-      github.event.pull_request.draft == false
+      (github.event.pull_request.draft == false || inputs.deploy_staging_on_draft)
     runs-on: ubuntu-latest
     outputs:
       version_id: ${{ steps.deploy.outputs.version_id }}
@@ -1549,7 +1558,7 @@ jobs:
       inputs.has_deploy &&
       inputs.has_staging_deploy &&
       github.event_name == 'pull_request' &&
-      github.event.pull_request.draft == false &&
+      (github.event.pull_request.draft == false || inputs.deploy_staging_on_draft) &&
       needs.deploy-staging-upload.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       needs.typecheck.result == 'success' &&
