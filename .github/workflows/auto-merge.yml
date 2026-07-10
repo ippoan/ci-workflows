@@ -93,8 +93,12 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      # verify_all_checks の check runs 読み取り用 (github.token で読む)
-      checks: read
+      # NOTE(#171): verify_all_checks の check runs 読み取りに `checks: read` を
+      # ここに宣言しないこと。reusable の permissions は caller chain 全体
+      # (frontend-ci/lib-ci の auto-merge 呼び出し + 全 consumer caller の
+      # top-level permissions) に宣言が波及し、1 つでも欠けると parse 時
+      # startup_failure になる (実害: #170 で全 repo の CI が停止)。読み取りは
+      # GITHUB_TOKEN permissions と独立な App installation token で行う。
     env:
       # App ID は数値で非機密。step `if:` の gate に使うため job-level env に置く
       # (env context は if で参照可、secrets context は不可)。private key は
@@ -231,10 +235,14 @@ jobs:
       # completed & 成功系 (success/neutral/skipped) になるまで bounded wait し、
       # 失敗が居たら queue せず loud fail する。
       # 複数 auto-merge job が同時に通過しても `gh pr merge --auto` は冪等。
+      # token は github.token でなく App token を使う (#171): github.token だと
+      # job permissions に `checks: read` の宣言が必要になり、それが caller chain
+      # 全体 (frontend-ci/lib-ci + 全 consumer caller) に波及して宣言漏れ 1 つで
+      # startup_failure になる。App token は上の guard step で必ず非空。
       - name: Wait for all sibling checks on head SHA (fail loud on red)
         if: ${{ inputs.verify_all_checks }}
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           TIMEOUT_MIN: ${{ inputs.all_checks_timeout_minutes }}
@@ -244,8 +252,12 @@ jobs:
           while :; do
             # filter=latest (API default) — 同名 check は最新 attempt のみ。
             # --paginate は page ごとに配列を出すので jq -s 'add' で連結する。
-            runs=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
-              --jq '[.check_runs[] | {name, status, conclusion}]' | jq -s 'add // []')
+            if ! raw=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
+              --jq '[.check_runs[] | {name, status, conclusion}]'); then
+              echo "::error title=auto-merge all-checks gate::check-runs API を読めませんでした。403 (Resource not accessible by integration) の場合は GitHub App (CI_APP_ID) の installation permissions に 'Checks: Read-only' を追加してください (Refs ippoan/ci-workflows#171)"
+              exit 1
+            fi
+            runs=$(echo "$raw" | jq -s 'add // []')
             # 自分達 (各 caller の Auto Merge job) は永遠に in_progress に見える
             # ので名前で除外する。
             bad=$(echo "$runs" | jq -r '[.[]
