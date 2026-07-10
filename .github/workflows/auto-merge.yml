@@ -24,6 +24,27 @@ on:
         type: string
         required: false
         default: ''
+      verify_all_checks:
+        description: |
+          merge を queue する前に、head SHA の全 check runs (Auto Merge 系
+          job 自身を除く) が completed かつ成功系になるまで待つ (default:
+          true)。同一 repo で複数 caller workflow が同じ PR に走る monorepo
+          では、各 workflow の内蔵 auto-merge が自 workflow の needs しか
+          見ないため、最初に完走した workflow が兄弟 workflow の完走前に
+          merge してしまう事故の再発防止 (Refs #169、実害:
+          ippoan/nuxt-notify#106 が Email CI failure + frontend CI 走行中に
+          merge)。
+        type: boolean
+        required: false
+        default: true
+      all_checks_timeout_minutes:
+        description: |
+          verify_all_checks の待ち時間上限 (分)。超過したら merge を queue
+          せず loud fail する。兄弟 workflow に長い pipeline (Bazel shard 等)
+          がある repo は伸ばすこと。
+        type: number
+        required: false
+        default: 30
     secrets:
       CI_APP_ID:
         description: |
@@ -72,6 +93,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # verify_all_checks の check runs 読み取り用 (github.token で読む)
+      checks: read
     env:
       # App ID は数値で非機密。step `if:` の gate に使うため job-level env に置く
       # (env context は if で参照可、secrets context は不可)。private key は
@@ -196,6 +219,57 @@ jobs:
           echo "::error::      CI_APP_PRIVATE_KEY: \${{ secrets.CI_APP_PRIVATE_KEY }}"
           echo "::error::Also confirm both are present as org (or repo) secrets in '${CALLER_OWNER}' and visible to this repository. The github.token fallback was removed because it caused intermittent 'API rate limit already exceeded' failures and a github-actions[bot] push actor that does not trigger downstream release workflows. See ippoan/ci-workflows#65."
           exit 1
+
+      # ---- 全 check green 検証 (Refs #169) ----
+      # 同一 repo で複数 caller workflow (nuxt-notify の CI / Email Worker CI /
+      # Realtime Bus Worker CI 等) が同じ PR に走ると、各 workflow の内蔵
+      # auto-merge は自 workflow の needs しか見ないため、最初に完走した workflow
+      # が兄弟 workflow の完走前に merge を queue してしまう。3 caller が同じ
+      # job id (`ci`) を使うと check 名も衝突するため required checks でも守れない
+      # (実害: ippoan/nuxt-notify#106 が Email CI failure + frontend CI 走行中に
+      # merge)。ここで head SHA の全 check runs (Auto Merge 系 job 自身を除く) が
+      # completed & 成功系 (success/neutral/skipped) になるまで bounded wait し、
+      # 失敗が居たら queue せず loud fail する。
+      # 複数 auto-merge job が同時に通過しても `gh pr merge --auto` は冪等。
+      - name: Wait for all sibling checks on head SHA (fail loud on red)
+        if: ${{ inputs.verify_all_checks }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TIMEOUT_MIN: ${{ inputs.all_checks_timeout_minutes }}
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
+          while :; do
+            # filter=latest (API default) — 同名 check は最新 attempt のみ。
+            # --paginate は page ごとに配列を出すので jq -s 'add' で連結する。
+            runs=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
+              --jq '[.check_runs[] | {name, status, conclusion}]' | jq -s 'add // []')
+            # 自分達 (各 caller の Auto Merge job) は永遠に in_progress に見える
+            # ので名前で除外する。
+            bad=$(echo "$runs" | jq -r '[.[]
+              | select((.name | test("Auto Merge") | not)
+                  and .status == "completed"
+                  and ((.conclusion // "") as $c | ["success","neutral","skipped"] | index($c) | not))]
+              | map(.name) | unique | join(", ")')
+            if [ -n "$bad" ]; then
+              echo "::error title=auto-merge all-checks gate::head SHA に失敗した check があります: $bad — merge を queue しません (Refs ippoan/ci-workflows#169)"
+              exit 1
+            fi
+            pending=$(echo "$runs" | jq '[.[]
+              | select((.name | test("Auto Merge") | not) and .status != "completed")] | length')
+            if [ "$pending" -eq 0 ]; then
+              echo "all sibling checks completed & green"
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error title=auto-merge all-checks gate::${TIMEOUT_MIN} 分待っても完了しない check が ${pending} 件あります — merge を queue しません。兄弟 workflow の pipeline が長い repo は input all_checks_timeout_minutes を伸ばしてください"
+              exit 1
+            fi
+            echo "waiting: $pending sibling checks still running..."
+            sleep 15
+          done
 
       - name: Check mergeable and queue squash merge
         env:
