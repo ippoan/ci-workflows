@@ -1798,8 +1798,22 @@ jobs:
           steps.deploy.outputs.no_traffic_upload == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          RELEASE_SCRIPT: ${{ inputs.deploy_release_script }}
         run: |
           set -euo pipefail
+          # caller の deploy_release_script が --config を指定している場合
+          # (monorepo sub-worker)、triggers deploy も同じ config を明示する。
+          # 無指定のまま wrangler の自動解決に任せると sub-worker の cwd でも
+          # repo root の wrangler.jsonc を掴み、Nuxt frontend 用 config の
+          # assets.directory エラーで落ちる (Refs #167、実害: nuxt-notify
+          # v0.0.31 の realtime-bus / email-receiver Deploy Release)。
+          CONFIG_ARG=()
+          CFG=$(printf '%s' "${RELEASE_SCRIPT:-}" | grep -oE -- '--config[= ][^ ]+' | head -1 || true)
+          if [ -n "$CFG" ]; then
+            # "--config path" は 2 要素に word-split させる (--config=path は 1 要素)。
+            # shellcheck disable=SC2206
+            CONFIG_ARG=($CFG)
+          fi
           # 複数 named environment を持つ config で --env 未指定だと wrangler が
           # 対話確認を求める (release-wave-handler の flip と同じ対策)。
           # top-level (production) 環境を明示するため空文字を渡す。
@@ -1807,7 +1821,7 @@ jobs:
           if ls wrangler.toml wrangler.jsonc wrangler.json >/dev/null 2>&1; then
             ENV_FLAG=(--env=)
           fi
-          npx wrangler triggers deploy "${ENV_FLAG[@]}"
+          npx wrangler triggers deploy "${CONFIG_ARG[@]}" "${ENV_FLAG[@]}"
 
       # ---- traffic-report (Refs ippoan/ci-dashboard#137) ----
       # deploy 後の worker version traffic split を ci-dashboard に報告し、
