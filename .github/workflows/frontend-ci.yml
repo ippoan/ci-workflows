@@ -51,6 +51,12 @@ on:
         description: 'Override staging deploy script (default: auto by project_type)'
         type: string
         default: ''
+      staging_url:
+        description: |
+          staging の公開 URL。指定すると PR staging deploy 完了コメントに
+          リンクとして載る (任意・未指定なら SHA と run リンクのみ)。
+        type: string
+        default: ''
       staging_build_secret_name:
         description: |
           Deploy to staging step に caller の secret を 1 つ環境変数として渡す
@@ -1377,6 +1383,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Deploy to staging
+        id: deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           STAGING_BUILD_SECRET: ${{ inputs.staging_build_secret_name != '' && secrets[inputs.staging_build_secret_name] || '' }}
@@ -1398,6 +1405,44 @@ jobs:
             fi
           fi
           eval "$CMD"
+
+      # staging deploy 完了を PR に sticky コメントで通知する (毎 deploy 1 個を
+      # 更新)。version SHA・run リンク・(あれば) staging URL を載せ、Actions を
+      # 見に行かずに反映を確認できるようにする。best-effort (失敗しても deploy は
+      # 落とさない)。untrusted 入力は使わない (SHA / run_id / repo / staging_url のみ)。
+      - name: Comment staging deploy on PR
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEPLOY_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STAGING_URL: ${{ inputs.staging_url }}
+          OUTCOME: ${{ steps.deploy.outcome }}
+        run: |
+          set -euo pipefail
+          MARKER='<!-- ci-workflows:staging-deploy -->'
+          SHORT="${DEPLOY_SHA:0:8}"
+          if [ "$OUTCOME" = "success" ]; then
+            HEAD="🚀 **Staging deployed** — \`$SHORT\` (\`$DEPLOY_SHA\`)"
+          else
+            HEAD="❌ **Staging deploy failed** — \`$SHORT\` (\`$DEPLOY_SHA\`)"
+          fi
+          BODY="$MARKER"$'\n'"$HEAD"$'\n'"- run: $RUN_URL"
+          if [ -n "$STAGING_URL" ]; then
+            BODY="$BODY"$'\n'"- url: $STAGING_URL"
+          fi
+          # 既存 sticky コメントがあれば更新、無ければ作成 (MARKER で識別)
+          CID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq "[.[] | select(.body | startswith(\"$MARKER\"))] | last | .id // empty")
+          if [ -n "$CID" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$BODY" >/dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$BODY" >/dev/null
+          fi
+          echo "commented staging deploy ($OUTCOME) on PR #$PR_NUMBER"
 
   deploy-staging-upload:
     name: Deploy Staging (upload)
