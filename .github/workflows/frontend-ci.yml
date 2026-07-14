@@ -2097,22 +2097,89 @@ jobs:
             popd >/dev/null
           done
 
-  propagate:
-    name: Propagate Package
+  # propagate の変更ゲート: 対象 package (npm_publish_name) のディレクトリが
+  # **前回の release tag から変更されている時だけ** consumer bump を走らせる。
+  # monorepo lock-step publish (全 package が tag ごとに publish される) でも、
+  # 対象 package に差分の無いリリースで 9 repo に bump PR が乱発されるのを防ぐ
+  # (Refs #177: auth-worker v0.2.107 — auth-client 未変更のリリースで propagate
+  # が走った)。不変則「gate は if: で済まさず job を分ける」に従い独立 job。
+  propagate-gate:
+    name: Propagate Gate (package changed?)
     needs: [publish-release]
     if: >-
       always() &&
       inputs.npm_publish_propagate_repos != '' &&
       needs.publish-release.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+      version: ${{ steps.diff.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 前回 tag との diff に全履歴 + tag が必要
+
+      - name: Diff package dir against previous release tag
+        id: diff
+        env:
+          PUBLISH_DIRS: ${{ inputs.npm_publish_directory }}
+          PACKAGE_NAME: ${{ inputs.npm_publish_name }}
+        run: |
+          set -euo pipefail
+          # publish 済みバージョンは tag から確定する (npm view 不要)
+          echo "version=^${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+          # npm_publish_name の package が入っている dir を特定する
+          PKG_DIR=""
+          IFS=',' read -ra DIRS <<< "$PUBLISH_DIRS"
+          for RAW_DIR in "${DIRS[@]}"; do
+            DIR="$(echo "$RAW_DIR" | xargs)"
+            [ -z "$DIR" ] && continue
+            NAME=$(node -p "require('$GITHUB_WORKSPACE/$DIR/package.json').name" 2>/dev/null || echo "")
+            if [ "$NAME" = "$PACKAGE_NAME" ]; then PKG_DIR="$DIR"; break; fi
+          done
+          if [ -z "$PKG_DIR" ]; then
+            echo "::error::npm_publish_name ($PACKAGE_NAME) が npm_publish_directory ($PUBLISH_DIRS) のどの package.json とも一致しません"
+            exit 1
+          fi
+
+          # 直前の release tag (現 tag を除く最新の v*)。無ければ初回 = changed
+          PREV=$(git tag --list 'v*' --sort=-v:refname | grep -vx "$GITHUB_REF_NAME" | head -1 || true)
+          if [ -z "$PREV" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "初回 release tag — propagate を実行します"
+            exit 0
+          fi
+          if git diff --quiet "$PREV" "$GITHUB_REF_NAME" -- "$PKG_DIR"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "### ⏭ Propagate skipped — $PACKAGE_NAME ($PKG_DIR) は $PREV から変更なし" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "$PKG_DIR は $PREV から変更あり — propagate を実行します"
+          fi
+
+  propagate:
+    name: Propagate Package
+    needs: [publish-release, propagate-gate]
+    if: >-
+      always() &&
+      inputs.npm_publish_propagate_repos != '' &&
+      needs.publish-release.result == 'success' &&
+      needs.propagate-gate.outputs.changed == 'true'
     uses: ippoan/ci-workflows/.github/workflows/propagate-package.yml@main
     with:
       package_name: ${{ inputs.npm_publish_name }}
-      package_version: ''
+      # gate が tag から確定した ^X.Y.Z (npm view による解決を省く)
+      package_version: ${{ needs.propagate-gate.outputs.version }}
       target_repos: ${{ inputs.npm_publish_propagate_repos }}
       working_directories: ${{ inputs.npm_publish_propagate_dirs }}
       npm_scope: ${{ inputs.npm_scope }}
     secrets:
+      # 認証は auto-merge と同じ GitHub App (org secret) を優先。
+      # PROPAGATE_PAT は後方互換のフォールバック
       PAT: ${{ secrets.PROPAGATE_PAT }}
+      CI_APP_ID: ${{ secrets.CI_APP_ID }}
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
   auto-merge:
     name: Auto Merge
