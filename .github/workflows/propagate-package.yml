@@ -1,5 +1,22 @@
 name: Propagate Package Update
 
+# publish 済み npm package の新バージョンを consumer repo 群へ bump PR として
+# 配る reusable workflow。
+#
+# ## 認証 (どちらか必須、両方あれば App 優先)
+#
+# - **CI_APP_ID / CI_APP_PRIVATE_KEY (推奨)**: auto-merge.yml と同じ
+#   ippoan-ci-bot GitHub App の installation token を **target repo の owner
+#   ごとに** mint して使う (org secret を使い回せる = repo 個別の PAT 不要)。
+#   App が対象 org (ippoan / ohishi-exp) に install 済みであること。
+#   owner は最大 2 org まで (現行 target は ippoan + ohishi-exp。増えたら
+#   mint step を足す — fail loud で検出される)。
+# - **PAT (フォールバック)**: repo scope を持つ classic PAT。App secret が
+#   渡されなかった場合のみ使う。
+#
+# バージョン解決の npm view には caller の GITHUB_TOKEN で足りる
+# (同 org package の read は自動 token で可) ため、認証 secret には依存しない。
+
 on:
   workflow_call:
     inputs:
@@ -25,30 +42,90 @@ on:
         default: '@ippoan'
     secrets:
       PAT:
-        description: 'PAT with repo scope for cross-repo operations'
-        required: true
+        description: 'PAT with repo scope for cross-repo operations (fallback when CI_APP_ID is not provided)'
+        required: false
+      CI_APP_ID:
+        description: 'GitHub App ID (org secret; same App as auto-merge.yml). Preferred over PAT.'
+        required: false
+      CI_APP_PRIVATE_KEY:
+        description: 'PEM private key for CI_APP_ID (org secret, multi-line).'
+        required: false
 
 jobs:
   propagate:
     runs-on: ubuntu-latest
+    env:
+      # if 式で secrets を直接参照できないため env に写す (値は mint にのみ使用)
+      CI_APP_ID: ${{ secrets.CI_APP_ID }}
     steps:
+      # target_repos の owner を重複排除で列挙する。App installation token は
+      # owner (org) 単位でしか mint できないため、owner ごとに 1 token 用意する
+      - name: Derive target owners
+        id: owners
+        env:
+          TARGET_REPOS: ${{ inputs.target_repos }}
+        run: |
+          OWNERS=$(echo "$TARGET_REPOS" | tr ',' '\n' | cut -d/ -f1 | sort -u)
+          COUNT=$(echo "$OWNERS" | wc -l)
+          if [ "$COUNT" -gt 2 ]; then
+            echo "::error::target_repos の owner が 3 org 以上あります ($OWNERS)。mint step を増やしてください (propagate-package.yml)"
+            exit 1
+          fi
+          echo "owner1=$(echo "$OWNERS" | sed -n 1p)" >> "$GITHUB_OUTPUT"
+          echo "owner2=$(echo "$OWNERS" | sed -n 2p)" >> "$GITHUB_OUTPUT"
+
+      - name: Mint App token (owner1)
+        id: app-token-1
+        if: env.CI_APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.owners.outputs.owner1 }}
+
+      - name: Mint App token (owner2)
+        id: app-token-2
+        if: env.CI_APP_ID != '' && steps.owners.outputs.owner2 != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.owners.outputs.owner2 }}
+
+      # App も PAT も無ければ fail loud (auto-merge.yml と同方針 — silent
+      # fallback で壊れたまま green に見せない)
+      - name: Require credentials
+        if: steps.app-token-1.outputs.token == ''
+        env:
+          PAT_PRESENT: ${{ secrets.PAT != '' }}
+        run: |
+          if [ "$PAT_PRESENT" = "true" ]; then exit 0; fi
+          echo "::error title=propagate: missing credentials::CI_APP_ID/CI_APP_PRIVATE_KEY (推奨) か PAT のどちらかを secrets で渡してください。cross-repo の PR 作成は GITHUB_TOKEN では不可能です。"
+          exit 1
+
       - name: Resolve version
         id: version
+        env:
+          PACKAGE_VERSION: ${{ inputs.package_version }}
+          PACKAGE: ${{ inputs.package_name }}
+          SCOPE: ${{ inputs.npm_scope }}
+          # 同 org package の read は workflow 既定 token で足りる
+          NPM_TOKEN: ${{ github.token }}
         run: |
-          if [ -n "${{ inputs.package_version }}" ]; then
-            echo "version=${{ inputs.package_version }}" >> "$GITHUB_OUTPUT"
+          if [ -n "$PACKAGE_VERSION" ]; then
+            echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
           else
-            echo "${{ inputs.npm_scope }}:registry=https://npm.pkg.github.com" > .npmrc
-            echo "//npm.pkg.github.com/:_authToken=${{ secrets.PAT }}" >> .npmrc
-            VER=$(npm view "${{ inputs.package_name }}" version 2>/dev/null || echo "")
+            echo "${SCOPE}:registry=https://npm.pkg.github.com" > .npmrc
+            echo "//npm.pkg.github.com/:_authToken=${NPM_TOKEN}" >> .npmrc
+            VER=$(npm view "$PACKAGE" version 2>/dev/null || echo "")
             rm .npmrc
             if [ -z "$VER" ]; then
-              echo "::error::Could not resolve latest version for ${{ inputs.package_name }}"
+              echo "::error::Could not resolve latest version for $PACKAGE"
               exit 1
             fi
             echo "version=^${VER}" >> "$GITHUB_OUTPUT"
           fi
-          echo "### Propagate ${{ inputs.package_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Propagate $PACKAGE" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/setup-node@v4
         with:
@@ -56,13 +133,28 @@ jobs:
 
       - name: Create PRs in target repos
         env:
-          GH_TOKEN: ${{ secrets.PAT }}
+          PAT_FALLBACK: ${{ secrets.PAT }}
+          TOKEN_OWNER1: ${{ steps.app-token-1.outputs.token }}
+          TOKEN_OWNER2: ${{ steps.app-token-2.outputs.token }}
+          OWNER1: ${{ steps.owners.outputs.owner1 }}
+          OWNER2: ${{ steps.owners.outputs.owner2 }}
           PACKAGE: ${{ inputs.package_name }}
           VERSION: ${{ steps.version.outputs.version }}
           SCOPE: ${{ inputs.npm_scope }}
+          TARGET_REPOS: ${{ inputs.target_repos }}
+          WORKING_DIRS: ${{ inputs.working_directories }}
         run: |
-          IFS=',' read -ra REPOS <<< "${{ inputs.target_repos }}"
-          IFS=',' read -ra DIRS <<< "${{ inputs.working_directories }}"
+          IFS=',' read -ra REPOS <<< "$TARGET_REPOS"
+          IFS=',' read -ra DIRS <<< "$WORKING_DIRS"
+
+          # repo の owner に対応する token を返す (App token 優先、無ければ PAT)
+          token_for() {
+            case "${1%%/*}" in
+              "$OWNER1") echo "${TOKEN_OWNER1:-$PAT_FALLBACK}" ;;
+              "$OWNER2") echo "${TOKEN_OWNER2:-$PAT_FALLBACK}" ;;
+              *) echo "$PAT_FALLBACK" ;;
+            esac
+          }
 
           BRANCH="chore/update-$(echo "$PACKAGE" | tr '/@' '-')-${VERSION//[^0-9.]/}"
 
@@ -71,10 +163,18 @@ jobs:
             REPO="${REPOS[$i]}"
             DIR="${DIRS[$i]:-.}"
             echo "--- $REPO (dir: $DIR) ---"
+            TOKEN=$(token_for "$REPO")
+            if [ -z "$TOKEN" ]; then
+              echo "::warning::No credential for $REPO (owner ${REPO%%/*}) — skipped"
+              RESULTS+=("$REPO: no credential")
+              continue
+            fi
 
-            # Clone
+            # Clone (token を URL に埋め込む — gh clone は push 用の credential
+            # helper を設定しないため、remote URL で認証を完結させる)
             TMPDIR=$(mktemp -d)
-            gh repo clone "$REPO" "$TMPDIR" -- --depth 1 2>&1 || { echo "::warning::Failed to clone $REPO"; continue; }
+            git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "$TMPDIR" 2>&1 \
+              || { echo "::warning::Failed to clone $REPO"; RESULTS+=("$REPO: clone failed"); continue; }
             cd "$TMPDIR"
 
             # Check if already up to date
@@ -89,10 +189,11 @@ jobs:
             # Create branch
             git checkout -b "$BRANCH"
 
-            # Install
+            # Install (registry read もその repo 用の credential で行う —
+            # consumer が他の @scope package に依存していても解決できるように)
             cd "$DIR"
             echo "${SCOPE}:registry=https://npm.pkg.github.com" > .npmrc
-            echo "//npm.pkg.github.com/:_authToken=${GH_TOKEN}" >> .npmrc
+            echo "//npm.pkg.github.com/:_authToken=${TOKEN}" >> .npmrc
             npm install "${PACKAGE}@${VERSION}" 2>&1 | tail -3
             rm .npmrc
 
@@ -114,7 +215,7 @@ jobs:
             git push origin "$BRANCH" 2>&1 || { echo "::warning::Failed to push to $REPO"; RESULTS+=("$REPO: push failed"); rm -rf "$TMPDIR"; continue; }
 
             # Create PR
-            PR_URL=$(gh pr create --repo "$REPO" --base main --head "$BRANCH" \
+            PR_URL=$(GH_TOKEN="$TOKEN" gh pr create --repo "$REPO" --base main --head "$BRANCH" \
               --title "chore: update ${PACKAGE} to ${VERSION}" \
               --body "Automated update from ${GITHUB_REPOSITORY} CI." 2>&1)
             echo "$PR_URL"

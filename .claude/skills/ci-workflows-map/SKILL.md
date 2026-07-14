@@ -261,6 +261,14 @@ jobs:
 | `npm_publish_propagate_repos` | `''` | publish 後に自動更新する対象リポジトリ (カンマ区切り) |
 | `npm_publish_propagate_dirs` | `''` | 対象リポジトリの working directory (カンマ区切り) |
 
+**propagate は変更ゲート付き** (`propagate-gate` job、Refs #177): release tag push 時に
+「npm_publish_name の package dir が **直前の release tag から変更されている時だけ**」
+propagate を実行する。monorepo lock-step publish (tag ごとに全 package が publish される)
+でも、対象 package 未変更のリリースで consumer 9 repo に bump PR が乱発されない。
+バージョンは gate が tag から `^X.Y.Z` を確定して渡す (npm view 解決を省く)。
+認証は auto-merge と同じ **GitHub App (CI_APP_ID / CI_APP_PRIVATE_KEY org secret) を優先**、
+`PROPAGATE_PAT` は後方互換フォールバック (詳細は propagate-package.yml のヘッダコメント)。
+
 ### go-ci.yml
 
 Go 向け CI pipeline。`vet` / `test` / `build` の 3 job + (opt-in) `secret-verify` で構成される。status check 名は caller の job id (例: `ci`) + ' / ' + reusable job name で、`ci / vet`, `ci / test`, `ci / build`, `ci / secret-verify` の 4 つに pin される (auth-worker の `ippoan-go-default` branch-protection preset 参照)。
