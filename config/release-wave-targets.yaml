@@ -81,13 +81,6 @@ targets:
     cf_account_id: 24b45709d060d957340180e995f0d373
     npm_scope: '@ippoan'
 
-  "ippoan/nuxt-egov":
-    platform: cloudflare-workers
-    cf_worker_name: nuxt-egov
-    cf_account_id: 24b45709d060d957340180e995f0d373
-    preview_hostname: preview-egov.ippoan.org
-    npm_scope: '@ippoan'  # @ippoan/egov-shinsei-sdk
-
   # nuxt-trouble (トラブル/状況管理 frontend、worker 名 nuxt-trouble)。
   # @ippoan/auth-client (StagingFooter) を使うので npm_scope 必須。
   # release-wave.yml caller は repo 側に配置済み。
