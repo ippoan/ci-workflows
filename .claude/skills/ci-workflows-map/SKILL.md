@@ -56,7 +56,7 @@ ippoan + ohishi-exp org 共通の **GitHub Actions reusable workflow 集**。各
 
 | workflow | 役割 |
 |---|---|
-| `release-wave-handler.yml` | `repository_dispatch` (flip/rollback 等) を受け platform 別 deploy → ci-dashboard webhook に shared secret 付き POST。設定は `config/release-wave-targets.yaml` 集約。cloudrun flip は revision tag を渡さず release-wave-gcp が `latestReadyRevision` を flip (#248) |
+| `release-wave-handler.yml` | `repository_dispatch` (flip/rollback 等) を受け platform 別 deploy → ci-dashboard webhook に shared secret 付き POST。設定は `config/release-wave-targets.yaml` 集約。cloudrun flip は revision tag を渡さず release-wave-gcp が `latestReadyRevision` を flip (#248)。platform は cloudflare-workers / cloudrun / **github-release** (#179 — GitHub Releases 配布 repo。flip = `gh release edit <tag> --latest` で staged Release を昇格しフリート自動更新を開始。alc-gw が使用) |
 | `validate-release-wave-targets.yml` | PR で `config/release-wave-targets.yaml` を編集した時に schema / 整合を検証 |
 
 ### 本 repo 自身用 (`-self` 接尾)
