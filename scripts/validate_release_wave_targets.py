@@ -63,17 +63,24 @@ def validate_structure(targets: dict) -> list[str]:
     for repo, e in targets.items():
         e = e or {}
         pf = e.get("platform")
-        if pf not in ("cloudflare-workers", "cloudrun"):
-            errs.append(f"{repo}: platform must be 'cloudflare-workers' or 'cloudrun' (got {pf!r})")
+        if pf not in ("cloudflare-workers", "cloudrun", "github-release"):
+            errs.append(
+                f"{repo}: platform must be 'cloudflare-workers', 'cloudrun' or "
+                f"'github-release' (got {pf!r})"
+            )
             continue
         if pf == "cloudrun":
             if not e.get("gcp_project") or not e.get("gcp_region") or not e.get("services"):
                 errs.append(f"{repo}: cloudrun requires gcp_project, gcp_region and non-empty services")
-        else:  # cloudflare-workers
+        elif pf == "cloudflare-workers":
             if not e.get("cf_account_id"):
                 errs.append(f"{repo}: cloudflare-workers requires cf_account_id")
             if not e.get("cf_worker_name") and not e.get("monorepo_units"):
                 errs.append(f"{repo}: cloudflare-workers requires cf_worker_name or monorepo_units")
+        # github-release (ci-workflows#179): 追加必須 field 無し。flip は
+        # handler が `gh release edit <tag> --latest` するだけで、repo 側の
+        # release.yml が staged Release (make_latest=false) + pending-release
+        # 報告を担う。
     return errs
 
 
@@ -218,6 +225,7 @@ def selftest() -> None:
     """pure logic の最小テスト (= 今回の 2 失敗を検知できることの回帰ガード)。"""
     # structural
     assert validate_structure({"r": {"platform": "x"}})
+    assert not validate_structure({"r": {"platform": "github-release"}})  # 追加 field 不要 (#179)
     assert not validate_structure({"r": {"platform": "cloudflare-workers", "cf_account_id": "a", "cf_worker_name": "w"}})
     assert validate_structure({"r": {"platform": "cloudflare-workers", "cf_account_id": "a"}})  # no worker/units
     assert validate_structure({"r": {"platform": "cloudrun", "gcp_project": "p"}})  # missing region/services
