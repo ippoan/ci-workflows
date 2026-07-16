@@ -266,12 +266,17 @@ jobs:
                 exit 1
               fi
               ;;
+            # GitHub Releases 配布 (alc-gw 等の Windows exe)。deploy は無く、
+            # flip = Release を latest に昇格 → フリートの自動更新
+            # (releases/latest 監視) が取り込む。追加必須 field 無し。
+            # Refs ippoan/ci-workflows#179
+            github-release) ;;
             "")
-              echo "::error::$REPO: 'platform' is missing in $CFG (must be 'cloudflare-workers' or 'cloudrun')"
+              echo "::error::$REPO: 'platform' is missing in $CFG (must be 'cloudflare-workers', 'cloudrun' or 'github-release')"
               exit 1
               ;;
             *)
-              echo "::error::$REPO: unknown platform '$platform' (must be 'cloudflare-workers' or 'cloudrun')"
+              echo "::error::$REPO: unknown platform '$platform' (must be 'cloudflare-workers', 'cloudrun' or 'github-release')"
               exit 1
               ;;
           esac
@@ -637,6 +642,69 @@ jobs:
           report_worker_name: ${{ needs.dispatch.outputs.cf_worker_name_override }}
           uploaded_version_id: ${{ github.event.client_payload.previewed_version_id }}
           tag: ${{ needs.dispatch.outputs.target_tag }}
+
+  # =========================================================================
+  # flip (github-release): Release を latest に昇格 (Refs ippoan/ci-workflows#179)
+  #
+  # GitHub Releases 配布の repo (alc-gw 等の Windows exe)。repo 側 release.yml が
+  # tag push で make_latest=false の Release (staged) を作って pending-release
+  # webhook に報告済み。flip = その Release を latest に昇格すると、インストール
+  # 済みフリートの自動更新 (releases/latest 監視) が新版を取り込む。
+  # rollback は当面手動 (`gh release edit <旧tag> --latest`)。
+  # =========================================================================
+  flip-github-release:
+    name: Flip (github-release)
+    needs: dispatch
+    if: needs.dispatch.outputs.event_type == 'release-wave-flip' && needs.dispatch.outputs.platform == 'github-release'
+    runs-on: ubuntu-latest
+    steps:
+      # target_tag は dispatch job で形式検証済み (^v?[a-zA-Z0-9._-]{1,64}$
+      # = command injection 不可)。GITHUB_TOKEN (contents: write) で自 repo の
+      # Release を編集する。draft / prerelease も解除して確実に latest にする。
+      - name: Promote release to latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.dispatch.outputs.target_tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --draft=false --prerelease=false --latest
+          echo "promoted $TAG to latest (fleet auto-update will pick it up)"
+
+      # pending_release flip (= Pending releases の Flip ボタン経由) には対応する
+      # wave が無いので flip-report を送らない (cloudflare-workers path と同じガード)。
+      - name: Callback flip-report
+        if: github.event.client_payload.pending_release != true
+        env:
+          WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
+          REPO: ${{ github.repository }}
+          CALLBACK: ${{ inputs.callback_base_url }}
+          WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          payload=$(jq -nc --arg wave_id "$WAVE_ID" --arg repo "$REPO" \
+            '{wave_id: $wave_id, repo: $repo, ok: true}')
+          curl -fsS -X POST "$CALLBACK/webhooks/release-wave/flip-report" \
+            -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$payload"
+
+      - name: Callback flip-report (on failure)
+        if: failure() && github.event.client_payload.pending_release != true
+        env:
+          WAVE_ID: ${{ needs.dispatch.outputs.wave_id }}
+          REPO: ${{ github.repository }}
+          CALLBACK: ${{ inputs.callback_base_url }}
+          WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          payload=$(jq -nc --arg wave_id "$WAVE_ID" --arg repo "$REPO" \
+            --arg error "flip job failed; see Actions log" \
+            '{wave_id: $wave_id, repo: $repo, ok: false, error: $error}')
+          curl -fsS -X POST "$CALLBACK/webhooks/release-wave/flip-report" \
+            -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$payload" || true
 
   # =========================================================================
   # Cloud Run path (Phase 4c)

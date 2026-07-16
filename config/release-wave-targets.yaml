@@ -103,3 +103,15 @@ targets:
     cf_account_id: 24b45709d060d957340180e995f0d373
     preview_hostname: preview-dtako.ippoan.org
     npm_scope: '@ippoan'
+
+  # ---- GitHub Releases 配布 (Windows デスクトップ exe) ----
+  # alc-gw は点呼 Windows GW の常駐 exe (Wails)。CF/Cloud Run のような
+  # deploy は無く、**GitHub Releases の latest が配信ゲート**:
+  # インストール済みフリートが releases/latest 監視の自動更新で取り込む。
+  # - stage: release.yml が make_latest=false で Release 作成 +
+  #   pending-release webhook 報告 (version_id=tag, preview_url=Release ページ)
+  # - flip:  handler が `gh release edit <tag> --latest` → フリート更新開始
+  # - rollback: 当面は手動 `gh release edit <旧tag> --latest`
+  # Refs ippoan/ci-workflows#179
+  "ippoan/alc-gw":
+    platform: github-release
