@@ -225,7 +225,12 @@ jobs:
               echo "${SCOPE}:registry=https://npm.pkg.github.com"
               echo "//npm.pkg.github.com/:_authToken=${NPM_TOKEN}"
             } > "$TMP_NPMRC"
-            NPM_CONFIG_USERCONFIG="$TMP_NPMRC" npm install "${PACKAGE}@${VERSION}" 2>&1 | tail -20
+            # NODE_AUTH_TOKEN も同じ token で export する — consumer の多くは
+            # 直下に `//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}` を持つ
+            # .npmrc を commit しており、project .npmrc は USERCONFIG より優先される
+            # ため、未定義だと空展開 → E401 になる (v0.2.147 run で .npmrc に
+            # _authToken 行を持つ 6 repo だけが 401 になった実害、issue #182)
+            NPM_CONFIG_USERCONFIG="$TMP_NPMRC" NODE_AUTH_TOKEN="$NPM_TOKEN" npm install "${PACKAGE}@${VERSION}" 2>&1 | tail -20
             NPM_EXIT=${PIPESTATUS[0]}
             rm -f "$TMP_NPMRC"
             if [ "$NPM_EXIT" -ne 0 ]; then
