@@ -16,6 +16,20 @@ name: Propagate Package Update
 #
 # バージョン解決の npm view には caller の GITHUB_TOKEN で足りる
 # (同 org package の read は自動 token で可) ため、認証 secret には依存しない。
+#
+# ## npm registry read も caller の GITHUB_TOKEN (issue #182)
+#
+# consumer repo での `npm install` の registry 認証も **caller の GITHUB_TOKEN**
+# で行う。App installation token は Packages permission を持たず一律 401 になる
+# (v0.2.146 run で全 consumer が npm E401 / clone 即死した実害)。propagate 対象
+# package は必ず caller (publisher) repo から publish されたものなので
+# GITHUB_TOKEN で read できる。前提が 2 つ:
+#
+# - **caller は `packages: read` (以上) を permissions で宣言していること**
+#   (frontend-ci / lib-ci 経由なら npm_scope 利用時の既存要件と同じ)。
+# - consumer が **他 repo 発の @scope package に依存する場合**は、その package の
+#   "Manage Actions access" に caller repo を追加すること (現行 consumer 9 repo の
+#   @ippoan 依存は auth-client / test-utils のみ = 全て caller 発なので追加不要)。
 
 on:
   workflow_call:
@@ -143,9 +157,18 @@ jobs:
           SCOPE: ${{ inputs.npm_scope }}
           TARGET_REPOS: ${{ inputs.target_repos }}
           WORKING_DIRS: ${{ inputs.working_directories }}
+          # npm registry read 用 (header の「npm registry read も caller の
+          # GITHUB_TOKEN」参照)。App token は Packages permission が無く 401 (#182)
+          NPM_TOKEN: ${{ github.token }}
         run: |
+          BASEDIR=$(pwd)
           IFS=',' read -ra REPOS <<< "$TARGET_REPOS"
           IFS=',' read -ra DIRS <<< "$WORKING_DIRS"
+
+          # 各 iteration の後始末。cwd を必ず BASEDIR に戻してから TMPDIR を消す —
+          # 消した TMPDIR に留まったまま continue すると次の git clone が getcwd 失敗で
+          # 即死し、2 repo 目以降が全滅する (v0.2.146 run の実害、issue #182)
+          cleanup() { cd "$BASEDIR" && rm -rf "$TMPDIR"; }
 
           # repo の owner に対応する token を返す (App token 優先、無ければ PAT)
           token_for() {
@@ -159,14 +182,17 @@ jobs:
           BRANCH="chore/update-$(echo "$PACKAGE" | tr '/@' '-')-${VERSION//[^0-9.]/}"
 
           RESULTS=()
+          FAILED=0
           for i in "${!REPOS[@]}"; do
             REPO="${REPOS[$i]}"
             DIR="${DIRS[$i]:-.}"
             echo "--- $REPO (dir: $DIR) ---"
+            cd "$BASEDIR"
             TOKEN=$(token_for "$REPO")
             if [ -z "$TOKEN" ]; then
               echo "::warning::No credential for $REPO (owner ${REPO%%/*}) — skipped"
               RESULTS+=("$REPO: no credential")
+              FAILED=1
               continue
             fi
 
@@ -174,7 +200,7 @@ jobs:
             # helper を設定しないため、remote URL で認証を完結させる)
             TMPDIR=$(mktemp -d)
             git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "$TMPDIR" 2>&1 \
-              || { echo "::warning::Failed to clone $REPO"; RESULTS+=("$REPO: clone failed"); continue; }
+              || { echo "::warning::Failed to clone $REPO"; RESULTS+=("$REPO: clone failed"); FAILED=1; cleanup; continue; }
             cd "$TMPDIR"
 
             # Check if already up to date
@@ -182,22 +208,22 @@ jobs:
             if [ "$CURRENT" = "$VERSION" ]; then
               echo "Already at $VERSION, skipping"
               RESULTS+=("$REPO: already up to date")
-              rm -rf "$TMPDIR"
+              cleanup
               continue
             fi
 
             # Create branch
             git checkout -b "$BRANCH"
 
-            # Install (registry read もその repo 用の credential で行う —
-            # consumer が他の @scope package に依存していても解決できるように)
+            # Install。registry read は NPM_TOKEN (= caller の GITHUB_TOKEN) —
+            # App token は Packages permission が無く 401 になる (#182、header 参照)。
             # NPM_CONFIG_USERCONFIG で一時 npmrc を指定し、repo 直下の (git 管理下
             # の可能性がある) .npmrc には一切触れない
             cd "$DIR"
             TMP_NPMRC=$(mktemp)
             {
               echo "${SCOPE}:registry=https://npm.pkg.github.com"
-              echo "//npm.pkg.github.com/:_authToken=${TOKEN}"
+              echo "//npm.pkg.github.com/:_authToken=${NPM_TOKEN}"
             } > "$TMP_NPMRC"
             NPM_CONFIG_USERCONFIG="$TMP_NPMRC" npm install "${PACKAGE}@${VERSION}" 2>&1 | tail -20
             NPM_EXIT=${PIPESTATUS[0]}
@@ -205,8 +231,8 @@ jobs:
             if [ "$NPM_EXIT" -ne 0 ]; then
               echo "::warning::npm install failed for $REPO (exit $NPM_EXIT)"
               RESULTS+=("$REPO: npm install failed")
-              cd "$TMPDIR"
-              rm -rf "$TMPDIR"
+              FAILED=1
+              cleanup
               continue
             fi
 
@@ -215,7 +241,7 @@ jobs:
             if [ -z "$(git status --porcelain)" ]; then
               echo "No changes, skipping"
               RESULTS+=("$REPO: no changes")
-              rm -rf "$TMPDIR"
+              cleanup
               continue
             fi
 
@@ -225,16 +251,24 @@ jobs:
             git add -A
             git commit -m "chore: update ${PACKAGE} to ${VERSION}"
 
-            git push origin "$BRANCH" 2>&1 || { echo "::warning::Failed to push to $REPO"; RESULTS+=("$REPO: push failed"); rm -rf "$TMPDIR"; continue; }
+            git push origin "$BRANCH" 2>&1 || { echo "::warning::Failed to push to $REPO"; RESULTS+=("$REPO: push failed"); FAILED=1; cleanup; continue; }
 
-            # Create PR
-            PR_URL=$(GH_TOKEN="$TOKEN" gh pr create --repo "$REPO" --base main --head "$BRANCH" \
+            # Create PR (rerun 時の "already exists" は成功扱いで冪等にする)
+            if PR_URL=$(GH_TOKEN="$TOKEN" gh pr create --repo "$REPO" --base main --head "$BRANCH" \
               --title "chore: update ${PACKAGE} to ${VERSION}" \
-              --body "Automated update from ${GITHUB_REPOSITORY} CI." 2>&1)
-            echo "$PR_URL"
-            RESULTS+=("$REPO: $PR_URL")
+              --body "Automated update from ${GITHUB_REPOSITORY} CI." 2>&1); then
+              echo "$PR_URL"
+              RESULTS+=("$REPO: $PR_URL")
+            elif echo "$PR_URL" | grep -qi "already exists"; then
+              echo "PR already exists"
+              RESULTS+=("$REPO: PR already exists")
+            else
+              echo "::warning::Failed to create PR for $REPO: $PR_URL"
+              RESULTS+=("$REPO: pr create failed")
+              FAILED=1
+            fi
 
-            rm -rf "$TMPDIR"
+            cleanup
           done
 
           # Summary
@@ -244,3 +278,11 @@ jobs:
           for r in "${RESULTS[@]}"; do
             echo "| ${r%%:*} | ${r#*: } |" >> "$GITHUB_STEP_SUMMARY"
           done
+
+          # 1 repo でもハード失敗があれば job を fail させる — per-repo warning だけだと
+          # 全滅しても green に見えて気づけない (v0.2.146 で実害、issue #182)。
+          # already up to date / no changes / PR already exists は正常系。
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::1つ以上の consumer への propagate が失敗しました (Summary の表を参照)"
+            exit 1
+          fi
