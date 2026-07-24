@@ -191,11 +191,24 @@ jobs:
 
             # Install (registry read もその repo 用の credential で行う —
             # consumer が他の @scope package に依存していても解決できるように)
+            # NPM_CONFIG_USERCONFIG で一時 npmrc を指定し、repo 直下の (git 管理下
+            # の可能性がある) .npmrc には一切触れない
             cd "$DIR"
-            echo "${SCOPE}:registry=https://npm.pkg.github.com" > .npmrc
-            echo "//npm.pkg.github.com/:_authToken=${TOKEN}" >> .npmrc
-            npm install "${PACKAGE}@${VERSION}" 2>&1 | tail -3
-            rm .npmrc
+            TMP_NPMRC=$(mktemp)
+            {
+              echo "${SCOPE}:registry=https://npm.pkg.github.com"
+              echo "//npm.pkg.github.com/:_authToken=${TOKEN}"
+            } > "$TMP_NPMRC"
+            NPM_CONFIG_USERCONFIG="$TMP_NPMRC" npm install "${PACKAGE}@${VERSION}" 2>&1 | tail -20
+            NPM_EXIT=${PIPESTATUS[0]}
+            rm -f "$TMP_NPMRC"
+            if [ "$NPM_EXIT" -ne 0 ]; then
+              echo "::warning::npm install failed for $REPO (exit $NPM_EXIT)"
+              RESULTS+=("$REPO: npm install failed")
+              cd "$TMPDIR"
+              rm -rf "$TMPDIR"
+              continue
+            fi
 
             # Check if anything changed
             cd "$TMPDIR"
