@@ -329,7 +329,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           # npm_scope (e.g. @ippoan) があれば GitHub Packages を registry に
           # 設定。NODE_AUTH_TOKEN を expose する .npmrc が actions/setup-node
           # 側で生成される。
@@ -499,7 +499,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           # npm_scope (e.g. @ippoan) があれば GitHub Packages を registry に
           # 設定。NODE_AUTH_TOKEN を expose する .npmrc が actions/setup-node
           # 側で生成される。
@@ -586,7 +586,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: ${{ needs.dispatch.outputs.npm_scope != '' && 'https://npm.pkg.github.com' || '' }}
           scope: ${{ needs.dispatch.outputs.npm_scope }}
 
