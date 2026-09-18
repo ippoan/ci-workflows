@@ -91,6 +91,16 @@ targets:
     preview_hostname: preview-trouble.ippoan.org
     npm_scope: '@ippoan'
 
+  # nuxt-vehicle-maintenance (車両整備記録 frontend、worker 名 nuxt-vehicle-maintenance)。
+  # @ippoan/auth-client を使うので npm_scope 必須。
+  # release-wave.yml caller は repo 側に配置済み。
+  "ippoan/nuxt-vehicle-maintenance":
+    platform: cloudflare-workers
+    cf_worker_name: nuxt-vehicle-maintenance
+    cf_account_id: 24b45709d060d957340180e995f0d373
+    preview_hostname: maintenance-preview.ippoan.org
+    npm_scope: '@ippoan'
+
   # nuxt-dtako-admin (dtako 運行データ管理画面、worker 名 dtako-admin)。
   # ohishi-exp org の repo (cross-org) だが platform は他の CF Worker と同じ。
   # @ippoan/auth-client (AuthCallback 等) を使うので npm_scope 必須。
