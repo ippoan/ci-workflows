@@ -18,6 +18,16 @@ name: rust-dep-check
 #     # with:
 #     #   working_directory: '.'
 #     #   machete_enforce: 'warn'   # warn | fail
+#     #   private_git_repos: 'vein-match'   # private な git 依存があるときだけ
+#     # secrets:                             # private_git_repos を渡すときだけ要る
+#     #   CI_APP_ID: ${{ secrets.CI_APP_ID }}
+#     #   CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
+#
+# private な git 依存 (Refs ippoan/vein-match#20): cargo-deny は `cargo metadata` で
+# workspace を解決するので、Cargo.toml に private repo の git 依存があると取得で落ちる。
+# `private_git_repos` に ippoan の repo 名を渡すと、checkout 直後に
+# .github/actions/private-git-auth が GitHub App の token で git の URL を書き換える。
+# 既定 (空) では step ごと skip され、secrets も要らない (既存 caller は無変更で同じ動き)。
 
 on:
   workflow_call:
@@ -32,6 +42,18 @@ on:
         type: string
         required: false
         default: 'warn'
+      private_git_repos:
+        description: "private な git 依存の repo 名 (ippoan の repo、owner 無し、カンマ区切り)。空 (既定) なら何もしない。渡すときは secrets CI_APP_ID / CI_APP_PRIVATE_KEY も要る"
+        type: string
+        required: false
+        default: ''
+    secrets:
+      CI_APP_ID:
+        description: 'GitHub App の App ID。private_git_repos を渡すときだけ要る'
+        required: false
+      CI_APP_PRIVATE_KEY:
+        description: 'GitHub App の private key。private_git_repos を渡すときだけ要る'
+        required: false
 
 permissions:
   contents: read
@@ -45,6 +67,14 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: private な git 依存の認証
+        if: inputs.private_git_repos != ''
+        uses: ippoan/ci-workflows/.github/actions/private-git-auth@main
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          repositories: ${{ inputs.private_git_repos }}
 
       - uses: taiki-e/install-action@v2
         with:

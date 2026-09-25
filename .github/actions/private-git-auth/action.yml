@@ -1,0 +1,60 @@
+name: Private git auth
+description: >-
+  ippoan org の private repo を git 依存として取れるよう、GitHub App (CI_APP_ID /
+  CI_APP_PRIVATE_KEY) の token で git の URL を書き換える。checkout の直後、
+  cargo / bazel などを打つ前に 1 回呼ぶ。
+
+# 仕組み: global の git 設定に `url.<token 付き URL>.insteadOf <素の URL>` を repo ごとに
+# 1 行足す。cargo (libgit2 / git CLI とも) と Bazel の git_repository (rules_rust の
+# crate_universe が git 依存に使う) はどちらもこの設定を読むので、Cargo.toml に書いた
+# 素の URL のまま認証付きで取得する (CARGO_NET_GIT_FETCH_WITH_CLI は不要、
+# 2026-09-25 実測)。
+#
+# token は `repositories` に絞り contents:read のみ。create-github-app-token が mask し、
+# job 終了時に revoke する。token は env 経由で渡し echo しない。
+# fork / Dependabot の PR は secrets が空なので create-github-app-token で loud fail する
+# (private repo を取れない以上、後段も必ず落ちるため)。
+#
+# Caller 例 (job の step として):
+#   - uses: ippoan/ci-workflows/.github/actions/private-git-auth@main
+#     with:
+#       app-id: ${{ secrets.CI_APP_ID }}
+#       private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+#       repositories: vein-match
+#
+# Refs ippoan/vein-match#20
+
+inputs:
+  app-id:
+    description: GitHub App の App ID (secrets.CI_APP_ID)
+    required: true
+  private-key:
+    description: GitHub App の private key (secrets.CI_APP_PRIVATE_KEY)
+    required: true
+  repositories:
+    description: 取得を許す ippoan の repo 名 (owner 無し)。カンマか改行で区切る (例 `vein-match`)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - id: app-token
+      uses: actions/create-github-app-token@v2
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ippoan
+        repositories: ${{ inputs.repositories }}
+        permission-contents: read
+
+    - name: git の URL を token 付きに書き換える
+      shell: bash
+      env:
+        TOKEN: ${{ steps.app-token.outputs.token }}
+        REPOS: ${{ inputs.repositories }}
+      run: |
+        set -euo pipefail
+        for r in $(printf '%s' "$REPOS" | tr ',' ' '); do
+          git config --global "url.https://x-access-token:${TOKEN}@github.com/ippoan/${r}.insteadOf" "https://github.com/ippoan/${r}"
+          echo "insteadOf: https://github.com/ippoan/${r}"
+        done
