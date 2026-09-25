@@ -40,6 +40,16 @@ name: Catalog Extract
 #       with:
 #         language: rust
 #         working_directory: '.'
+#         private_git_repos: 'vein-match'   # private な git 依存があるときだけ
+#       secrets:                             # private_git_repos を渡すときだけ要る
+#         CI_APP_ID: ${{ secrets.CI_APP_ID }}
+#         CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
+#
+# private な git 依存 (Refs ippoan/vein-match#20): rust の `cargo doc --no-deps --workspace`
+# も workspace を解決するので、Cargo.toml に private repo の git 依存があると取得で落ちる。
+# `private_git_repos` を渡すと checkout 直後に .github/actions/private-git-auth が
+# GitHub App の token で git の URL を書き換える。既定 (空) では step ごと skip され、
+# secrets も要らない (既存 caller は無変更で同じ動き)。rust-dep-check.yml と同じ口。
 
 on:
   workflow_call:
@@ -93,6 +103,18 @@ on:
         required: false
         type: string
         default: ''
+      private_git_repos:
+        description: "private な git 依存の repo 名 (ippoan の repo、owner 無し、カンマ区切り)。空 (既定) なら何もしない。渡すときは secrets CI_APP_ID / CI_APP_PRIVATE_KEY も要る"
+        required: false
+        type: string
+        default: ''
+    secrets:
+      CI_APP_ID:
+        description: 'GitHub App の App ID。private_git_repos を渡すときだけ要る'
+        required: false
+      CI_APP_PRIVATE_KEY:
+        description: 'GitHub App の private key。private_git_repos を渡すときだけ要る'
+        required: false
     outputs:
       artifact_name:
         description: 'Name of the uploaded artifact containing catalog-extract.jsonl.'
@@ -119,6 +141,14 @@ jobs:
         with:
           fetch-depth: 1
           submodules: ${{ inputs.submodules }}
+
+      - name: private な git 依存の認証
+        if: inputs.private_git_repos != ''
+        uses: ippoan/ci-workflows/.github/actions/private-git-auth@main
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          repositories: ${{ inputs.private_git_repos }}
 
       - name: Validate language input
         env:

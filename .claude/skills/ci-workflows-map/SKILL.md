@@ -70,6 +70,7 @@ ippoan + ohishi-exp org 共通の **GitHub Actions reusable workflow 集**。各
 | `config/release-wave-targets.yaml` | wave 参加 repo の platform / service / preview hostname。新規参加 = yaml entry 追加 + repo に caller 1 file |
 | `scripts/cloud-run/deploy.sh` `extract_secrets.py` | cloud-run-deploy.yml が呼ぶ補助 script |
 | `.github/actions/{pr-limit,report-backend-deploy,report-frontend-compat}/action.yml` | composite action (PR 数制限 / deploy・compat レポート) |
+| `.github/actions/private-git-auth/action.yml` | composite action: GitHub App token で `url.<token 付き URL>.insteadOf` を打ち、ippoan の private repo を git 依存として取れるようにする (cargo / Bazel crate_universe 共通。Refs ippoan/vein-match#20)。`rust-dep-check.yml` / `catalog-extract.yml` の `private_git_repos` input と caller の job から使う |
 
 ## entrypoint / 使い方
 
@@ -418,7 +419,13 @@ Rust の依存グラフ監視 reusable。`dep-check` 1 job で以下を実行す
     # with:
     #   working_directory: '.'
     #   machete_enforce: 'warn'   # warn | fail
+    #   private_git_repos: 'vein-match'   # private な git 依存があるときだけ (secrets CI_APP_ID/KEY も渡す)
 ```
+
+**private な git 依存**: cargo-deny は `cargo metadata` で workspace を解決するので、private repo の
+git 依存があると取得で落ちる。`private_git_repos` (既定は空 = 何もしない) と named secrets
+`CI_APP_ID` / `CI_APP_PRIVATE_KEY` を渡すと `private-git-auth` action が認証する。
+`catalog-extract.yml` (rust の `cargo doc --no-deps --workspace`) にも同じ口がある。
 
 実例: `ippoan/rust-alc-api` の `ci.yml` (rust-s3 の旧 hyper スタック二重等、
 既知重複の解消追跡に使用)。
