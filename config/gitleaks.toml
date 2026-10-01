@@ -1,0 +1,69 @@
+# ippoan / ohishi-exp 共通の gitleaks 設定。
+# auto-merge.yml (PR 範囲) と gitleaks.yml (全履歴) が読む。
+#
+# 既定ルールに `KEY=平文` 型を足している。既定ルールは高エントロピーな鍵しか
+# 拾わず、ドキュメントの実行例に書かれた人間が決めたパスワードを素通しするため。
+# `.md` は除外しない (この型の混入はドキュメントで起きる)。
+#
+# 除外は「73 repo の全履歴で繰り返し出た誤検知」だけに絞ってある。
+# repo 固有の例外は repo 直下の `.gitleaksignore` (fingerprint) か、行内コメント
+# `gitleaks:allow` で行う。ここに repo 名や path を足すのは最後の手段。
+title = "ippoan shared gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "env-inline-credential"
+description = "KEY=平文 型の認証情報 (シェルの inline 代入 / .env / ドキュメントの実行例)"
+regex = '''\b[A-Z][A-Z0-9_]*(?:PASSWORD|PASSWD|_PASS|SECRET|TOKEN|API_KEY|PRIVATE_KEY)[A-Z0-9_]*=["']?([^\s$"'<{*/.\\)(\x60\[][^\s"'\\)\x60]{3,})'''
+secretGroup = 1
+keywords = ["password", "passwd", "_pass", "secret", "token", "api_key", "private_key"]
+
+  [[rules.allowlists]]
+  description = "値ではなく名前・場所を指すキー"
+  regexTarget = "match"
+  regexes = ['''(?:_NAME|_NAMES|_PATH|_URL|_URI|_FILE|_DIR|_ID|_TTL|_ENDPOINT|_HEADER|_VERSION|_ENABLED|_TYPE|_PREFIX|_KEYS?|TOKENS)=''']
+
+  [[rules.allowlists]]
+  description = "Secret Manager 参照 (NAME:latest) / 別の変数名の代入 / 例示値"
+  regexes = [
+    ''':(?:latest|\d+)(?:[,\x60]|$)''',
+    '''^(?:secrets\.|env\.|vars\.)?[A-Z][A-Z0-9_]*[,;\x60]?$''',
+    '''(?i)^(?:x{3,}|your[_-]|my[_-]|some[_-]|dummy|example|sample|changeme|change[_-]me|placeholder|postgres|password|passw0rd|secret|test|dev[_-]|local|foo|bar|none|null|true|false|パスワード|\*+)''',
+    '''(?i)(?:removed|redacted)''',
+    '''\.{3}$''',
+    '''^\d+$''',
+  ]
+
+[[allowlists]]
+description = "ベンダーコード・生成物"
+paths = [
+  '''(?:^|/)(?:node_modules|vendor|third_party|managed_components)/''',
+  '''(?:^|/)components/mbedtls/''',
+  '''(?:^|/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|go\.sum)$''',
+  '''\.min\.js$''',
+]
+
+[[allowlists]]
+description = "テスト・fixture 内の使い捨ての鍵 (高精度な provider ルールはテスト内でも検知を残す)"
+targetRules = ["generic-api-key", "private-key", "jwt", "env-inline-credential"]
+paths = [
+  '''(?:^|/)(?:tests?|__tests__|fixtures?|testdata|test_data|mocks?|e2e|spec)/''',
+  '''[._-](?:test|spec)\.[cm]?[jt]sx?$''',
+  '''_test\.(?:go|rs)$''',
+]
+
+[[allowlists]]
+description = "generic-api-key が誤認する非秘密の識別子 (git SHA / RSA 公開鍵 / Access の AUD)"
+targetRules = ["generic-api-key"]
+regexes = [
+  '''^[0-9a-f]{40}$''',
+  '''^MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A''',
+]
+
+[[allowlists]]
+description = "Cloudflare Access の AUD tag は公開値"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+regexes = ['''CF_ACCESS_AUD''']

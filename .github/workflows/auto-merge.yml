@@ -45,6 +45,25 @@ on:
         type: number
         required: false
         default: 30
+      gitleaks:
+        description: |
+          PR で追加された commit 範囲 (base..head) を gitleaks でスキャンし、
+          秘密情報の混入があれば merge を queue しない (default: true)。
+          設定は ippoan/ci-workflows の `config/gitleaks.toml` (既定ルール +
+          `KEY=平文` 型)。repo 側の `.gitleaks.toml` は読まない。誤検知の除外は
+          repo 直下の `.gitleaksignore` か行内 `gitleaks:allow` で行う。
+          public repo では push した時点で公開済みなので、検出されたら除外や
+          履歴の修正より先に、その認証情報を失効・変更すること。
+        type: boolean
+        required: false
+        default: true
+      gitleaks_config_ref:
+        description: |
+          `config/gitleaks.toml` を取る ippoan/ci-workflows の ref (default:
+          main)。設定を変える PR を merge 前に検証するときだけ指定する。
+        type: string
+        required: false
+        default: 'main'
     secrets:
       CI_APP_ID:
         description: |
@@ -86,9 +105,90 @@ on:
         required: false
 
 jobs:
+  # ---- 秘密情報の混入 gate ----
+  # auto-merge job とは別 job にしてある: 外部バイナリ (gitleaks) を、App の
+  # private key と contents: write の token を扱う job の中で実行しないため。
+  # ここは contents: read だけ (caller chain が既に持つ scope の部分集合なので
+  # NOTE(#171) の startup_failure には当たらない。新しい scope を足さないこと)。
+  # 失敗すると下の auto-merge job は skip され、兄弟 workflow の auto-merge も
+  # verify_all_checks でこの check の失敗を見て merge を queue しない。
+  gitleaks:
+    name: Secret Scan (gitleaks)
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false && inputs.gitleaks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # 版と中身を両方固定する (checksums を同じ release から取ると版しか
+      # 固定されない)。上げるときは 2 行とも変える。gitleaks.yml も同じ値。
+      GITLEAKS_VERSION: '8.30.1'
+      GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+    steps:
+      # commit と tree は全履歴、blob は `git log -p` が要る分だけ遅延取得する。
+      # 作業ツリーは root のファイル (.gitleaksignore) と .github だけ。
+      - name: Checkout PR head (history only)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: .github
+
+      - name: Checkout shared gitleaks config
+        uses: actions/checkout@v4
+        with:
+          repository: ippoan/ci-workflows
+          ref: ${{ inputs.gitleaks_config_ref }}
+          path: _ci-workflows
+          sparse-checkout: |
+            config/gitleaks.toml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+
+      - name: Scan commits added by this PR
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/gitleaks.json"
+          rc=0
+          "$RUNNER_TEMP/gitleaks" git . \
+            --log-opts="${BASE_SHA}..${HEAD_SHA}" \
+            -c _ci-workflows/config/gitleaks.toml \
+            --redact=100 --no-banner --exit-code 1 \
+            --report-format json -r "$report" || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "no leaks in ${BASE_SHA}..${HEAD_SHA}"
+            exit 0
+          fi
+          if [ "$rc" -ne 1 ] || [ ! -s "$report" ]; then
+            echo "::error title=gitleaks::スキャン自体が失敗しました (exit $rc)。検出ではありません — 上のログを確認してください"
+            exit 1
+          fi
+          # 値は --redact で伏せてある。場所とルールだけを annotation にする。
+          jq -r '.[] | "::error file=\(.File),line=\(.StartLine),title=gitleaks (\(.RuleID))::秘密情報らしき値を検出 (commit \(.Commit[0:7])、fingerprint \(.Fingerprint))"' "$report"
+          echo "::error title=gitleaks::$(jq length "$report") 件検出 — merge を queue しません。本物なら、まずその認証情報を失効・変更してください (push 済み = public repo では公開済み。commit を消しても漏れた事実は消えません)。誤検知なら該当行に 'gitleaks:allow' を付けるか、fingerprint を repo 直下の .gitleaksignore に 1 行ずつ足してください"
+          exit 1
+
   auto-merge:
     name: Auto Merge
-    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    needs: gitleaks
+    # `!cancelled()` が要る: needs の job が skip (inputs.gitleaks == false) だと
+    # 既定では後続も skip に伝播する。gitleaks が failure のときは走らせない。
+    if: >-
+      !cancelled() &&
+      github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
+      (needs.gitleaks.result == 'success' || needs.gitleaks.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: write

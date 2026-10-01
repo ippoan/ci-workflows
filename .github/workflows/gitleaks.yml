@@ -12,19 +12,18 @@ name: Gitleaks
 #     gitleaks:
 #       uses: ippoan/ci-workflows/.github/workflows/gitleaks.yml@main
 #       with:
-#         config_path: .gitleaks.toml    # optional (省略時は repo 直下の .gitleaks.toml、無ければ既定ルール)
+#         config_path: .gitleaks.toml    # optional (省略時は ci-workflows の config/gitleaks.toml)
+#
+# PR で足された commit 範囲の検査は auto-merge.yml が既定で行う (caller 不要)。
+# こちらは全履歴を見たいとき用 (定期実行・履歴を書き換えた後の確認)。
 
 on:
   workflow_call:
     inputs:
       config_path:
-        description: 'gitleaks config (repo-relative). 存在しなければ既定ルールのみ'
+        description: 'repo 側の gitleaks config (repo-relative)。空なら ippoan/ci-workflows の config/gitleaks.toml'
         type: string
-        default: '.gitleaks.toml'
-      version:
-        description: 'gitleaks version (without v)'
-        type: string
-        default: '8.30.1'
+        default: ''
       runs_on:
         description: 'runner label'
         type: string
@@ -37,29 +36,35 @@ jobs:
   gitleaks:
     name: gitleaks
     runs-on: ${{ inputs.runs_on }}
+    env:
+      # 版と中身を両方固定する。上げるときは 2 行とも変える。auto-merge.yml も同じ値。
+      GITLEAKS_VERSION: '8.30.1'
+      GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Checkout shared gitleaks config
+        if: ${{ inputs.config_path == '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ippoan/ci-workflows
+          path: _ci-workflows
+          sparse-checkout: |
+            config/gitleaks.toml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       - name: Install gitleaks
-        env:
-          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          base="https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}"
-          tarball="gitleaks_${VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$tarball" "${base}/${tarball}"
-          curl -sSfL -o checksums.txt "${base}/gitleaks_${VERSION}_checksums.txt"
-          grep " ${tarball}\$" checksums.txt | sha256sum -c -
-          tar -xzf "$tarball" gitleaks
-          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
       - name: Scan full history
         env:
-          CONFIG_PATH: ${{ inputs.config_path }}
+          CONFIG_PATH: ${{ inputs.config_path || '_ci-workflows/config/gitleaks.toml' }}
         run: |
           set -euo pipefail
-          args=(git . --redact=100 --no-banner --exit-code 1)
-          if [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ]; then
-            args+=(-c "$CONFIG_PATH")
-          fi
-          gitleaks "${args[@]}"
+          "$RUNNER_TEMP/gitleaks" git . -c "$CONFIG_PATH" --redact=100 --no-banner --exit-code 1
