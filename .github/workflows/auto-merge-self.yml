@@ -31,7 +31,13 @@ permissions:
 
 jobs:
   auto-merge:
-    uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
+    # `@main` ではなく PR 自身の版を呼ぶ: auto-merge.yml を変える PR が、
+    # merge 前に自分自身の run で新しい版を通す (= 全 repo へ出る前の canary)。
+    # `@main` だと PR の run は旧版で通ってしまい、新しい版が初めて動くのが
+    # merge 後の全 repo の PR になる。gitleaks の設定も PR の版を読ませる。
+    uses: ./.github/workflows/auto-merge.yml
+    with:
+      gitleaks_config_ref: ${{ github.event.pull_request.head.sha }}
     permissions:
       contents: write
       pull-requests: write
