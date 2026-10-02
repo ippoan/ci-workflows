@@ -362,3 +362,20 @@ jobs:
 | `test_runs_on` | `ubuntu-latest` | test job の runner label |
 
 `secrets: inherit` は不要 (`GITHUB_TOKEN` は workflow_call で permissions block 経由)。
+
+## `scripts/pre-push-gitleaks.sh`
+
+git の pre-push hook。push される commit 範囲を `config/gitleaks.toml` で
+スキャンし、検出があれば push を拒否する。`auto-merge.yml` の
+`Secret Scan (gitleaks)` は push の後にしか走らない (public repo では公開済み)
+ので、公開前に止めるのはこちら。
+
+マシンごとに、global の `core.hooksPath` 配下の `pre-push` から呼ぶ:
+
+```bash
+printf '%s\n' "$input" | <この repo の checkout>/scripts/pre-push-gitleaks.sh "$@" || exit $?
+```
+
+`gitleaks` は workflow の `GITLEAKS_VERSION` と同じ版を PATH に置く。未導入なら
+1 行警告して push を通す。誤検知の除外は CI と同じ (`gitleaks:allow` /
+`.gitleaksignore`)。
