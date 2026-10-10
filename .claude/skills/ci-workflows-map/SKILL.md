@@ -396,6 +396,8 @@ jobs:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
+`version_from_tag: true` を `with:` に足すと、publish の前に `package.json` の version を git tag 名 (先頭の `v` を除く、例: `v1.2.3` → `1.2.3`) に書き換えてから publish する。tag が semver (`vX.Y.Z[-pre][+build]`) でなければ `::error::` で停止する。既定は `false` で、指定しない他 repo の挙動は変わらない。tag 起動 (`refs/tags/v*`) のときだけ有効で、それ以外の起動では何もしない。
+
 `NODE_AUTH_TOKEN` は同 org 内 publish なら `${{ secrets.GITHUB_TOKEN }}` で足りる。 npmjs.org publish に切り替える場合は granular npm access token を caller secret として渡す + `registry_url: 'https://registry.npmjs.org'` も合わせて override。
 
 ### rust-dep-check.yml
