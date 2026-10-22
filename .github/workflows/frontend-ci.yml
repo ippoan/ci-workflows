@@ -292,6 +292,13 @@ on:
           caller は明示渡しで透過できる)。
         required: false
 
+# npm install / npm ci に付いてくる audit と fund の通信を切る。CI はその結果を使っていない。
+# registry の audit が詰まると、npm の fetch-timeout (300 秒) まで install が止まる
+# (2026-10-22、alc-app の Install dependencies が 10 秒 → 300 秒。Refs #194)。
+env:
+  npm_config_audit: 'false'
+  npm_config_fund: 'false'
+
 jobs:
   # PR auto-merge を CI 開始時に強制 disable する defense-in-depth step。
   # branch protection の required check に CI が含まれていない repo で、
@@ -567,6 +574,7 @@ jobs:
         run: echo "hash=${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore node_modules (warm from default branch)
+        id: nm-restore
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -586,8 +594,10 @@ jobs:
       # (rust target/ の「中途半端な PR 成果物が main を汚す」問題が無いので
       # catalog-extract.yml の main-only より緩めてよい)。これで PR も 2 回目以降
       # 自前 scope から warm restore できる。
+      # restore は restore-keys 無しの key のみ = hit は必ず exact。そのとき save は
+      # 「Unable to reserve cache」で失敗するか PR scope に同一 cache の複製を作るだけなので飛ばす。
       - name: Save node_modules (main warm + PR self-warm)
-        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        if: (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && steps.nm-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -837,6 +847,7 @@ jobs:
         run: echo "hash=${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore node_modules (warm from default branch)
+        id: nm-restore
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -856,8 +867,10 @@ jobs:
       # (rust target/ の「中途半端な PR 成果物が main を汚す」問題が無いので
       # catalog-extract.yml の main-only より緩めてよい)。これで PR も 2 回目以降
       # 自前 scope から warm restore できる。
+      # restore は restore-keys 無しの key のみ = hit は必ず exact。そのとき save は
+      # 「Unable to reserve cache」で失敗するか PR scope に同一 cache の複製を作るだけなので飛ばす。
       - name: Save node_modules (main warm + PR self-warm)
-        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        if: (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && steps.nm-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -963,6 +976,7 @@ jobs:
         run: echo "hash=${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore node_modules (warm from default branch)
+        id: nm-restore
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -982,8 +996,10 @@ jobs:
       # (rust target/ の「中途半端な PR 成果物が main を汚す」問題が無いので
       # catalog-extract.yml の main-only より緩めてよい)。これで PR も 2 回目以降
       # 自前 scope から warm restore できる。
+      # restore は restore-keys 無しの key のみ = hit は必ず exact。そのとき save は
+      # 「Unable to reserve cache」で失敗するか PR scope に同一 cache の複製を作るだけなので飛ばす。
       - name: Save node_modules (main warm + PR self-warm)
-        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        if: (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && steps.nm-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -1352,6 +1368,7 @@ jobs:
         run: echo "hash=${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore node_modules (warm from default branch)
+        id: nm-restore
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -1362,8 +1379,10 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # restore は restore-keys 無しの key のみ = hit は必ず exact。そのとき save は
+      # 「Unable to reserve cache」で失敗するか PR scope に同一 cache の複製を作るだけなので飛ばす。
       - name: Save node_modules (main warm + PR self-warm)
-        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        if: (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && steps.nm-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -1495,6 +1514,7 @@ jobs:
         run: echo "hash=${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore node_modules (warm from default branch)
+        id: nm-restore
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -1514,8 +1534,10 @@ jobs:
       # (rust target/ の「中途半端な PR 成果物が main を汚す」問題が無いので
       # catalog-extract.yml の main-only より緩めてよい)。これで PR も 2 回目以降
       # 自前 scope から warm restore できる。
+      # restore は restore-keys 無しの key のみ = hit は必ず exact。そのとき save は
+      # 「Unable to reserve cache」で失敗するか PR scope に同一 cache の複製を作るだけなので飛ばす。
       - name: Save node_modules (main warm + PR self-warm)
-        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        if: (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && steps.nm-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -1685,6 +1707,7 @@ jobs:
         run: echo "hash=${{ hashFiles(inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/package-lock.json', inputs.working_directory)) }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore node_modules (warm from default branch)
+        id: nm-restore
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
@@ -1704,8 +1727,10 @@ jobs:
       # (rust target/ の「中途半端な PR 成果物が main を汚す」問題が無いので
       # catalog-extract.yml の main-only より緩めてよい)。これで PR も 2 回目以降
       # 自前 scope から warm restore できる。
+      # restore は restore-keys 無しの key のみ = hit は必ず exact。そのとき save は
+      # 「Unable to reserve cache」で失敗するか PR scope に同一 cache の複製を作るだけなので飛ばす。
       - name: Save node_modules (main warm + PR self-warm)
-        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        if: (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && steps.nm-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.working_directory }}/node_modules
