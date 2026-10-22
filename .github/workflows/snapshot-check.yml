@@ -24,6 +24,13 @@ on:
         description: 'PAT with read:packages + repo (Issues read) scope. Used for npm install + GitHub API calls in snapshot:check.'
         required: true
 
+# npm install / npm ci に付いてくる audit と fund の通信を切る。CI はその結果を使っていない。
+# registry の audit が詰まると、npm の fetch-timeout (300 秒) まで install が止まる
+# (2026-10-22、alc-app の Install dependencies が 10 秒 → 300 秒。Refs #194)。
+env:
+  npm_config_audit: 'false'
+  npm_config_fund: 'false'
+
 jobs:
   check:
     runs-on: ubuntu-latest
