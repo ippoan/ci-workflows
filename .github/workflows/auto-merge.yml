@@ -406,24 +406,4 @@ jobs:
           # this job tries to merge immediately and gets rejected with
           # "base branch policy prohibits the merge" because the very job
           # that's running IS one of the required checks (chicken/egg).
-          #
-          # 同じ PR に Auto Merge job が複数走る (CI 内蔵の auto-merge と単体の
-          # auto-merge workflow 等) と、後から打った側が
-          # "Merge already in progress" で失敗する。merge 自体は先の側で進んで
-          # いるので、その文言と PR が既に MERGED の場合だけ成功扱いにする。
-          # それ以外の失敗は今までどおり exit 1。(Refs ippoan/alc-app#488)
-          if OUT=$(gh pr merge "$PR" --auto --squash --repo "$REPO" 2>&1); then
-            echo "$OUT"
-            exit 0
-          fi
-          echo "$OUT"
-          if echo "$OUT" | grep -q "Merge already in progress"; then
-            echo "::notice::PR #$PR は別の Auto Merge job が merge 中のため成功扱いにします"
-            exit 0
-          fi
-          STATE=$(gh pr view "$PR" --repo "$REPO" --json state --jq .state || true)
-          if [ "$STATE" = "MERGED" ]; then
-            echo "::notice::PR #$PR は既に merge 済みのため成功扱いにします"
-            exit 0
-          fi
-          exit 1
+          gh pr merge "$PR" --auto --squash --repo "$REPO"
