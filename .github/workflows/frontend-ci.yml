@@ -1025,12 +1025,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Fetch init_local_db.sql from rust-alc-api
-        run: |
-          mkdir -p tests/fixtures
-          curl -sfL "https://raw.githubusercontent.com/ippoan/rust-alc-api/main/scripts/init_local_db.sql" \
-            -o tests/fixtures/init_local_db.sql
-
       # compat_backend_repo 指定時、記録対象の backend SHA を test 前に解決する。
       # compat_backend_image_env が指定されていれば、その env 名で
       # `ghcr.io/<repo>:<sha>` を export し、compose が **記録する SHA と同じ
@@ -1075,6 +1069,35 @@ jobs:
           if [[ -n "$image" && -n "$IMAGE_ENV_NAME" ]]; then
             echo "${IMAGE_ENV_NAME}=ghcr.io/${BACKEND_REPO}:${image}" >> "$GITHUB_ENV"
             echo "::notice::integration test will run against ghcr.io/${BACKEND_REPO}:${image} (recorded SHA)"
+          fi
+
+      # テスト DB の初期化 SQL。正本は ippoan/alc-migrations の scripts/init_local_db.sql で、
+      # **テストする backend の commit の Cargo.toml に固定された alc-migrations の rev** から取る
+      # (backend の image に埋め込まれた migration と同じ rev。rev が違うと migration 174 などと衝突する)。
+      # rust-alc-api は写しの scripts/init_local_db.sql を消した (ippoan/rust-alc-api#754) ので、
+      # そこを直接取らない。rev が読めない (古い backend) ときだけ、その commit の写しに落とす。
+      - name: Fetch init_local_db.sql (alc-migrations, backend の rev)
+        env:
+          BACKEND_REPO: ${{ inputs.compat_backend_repo }}
+          BACKEND_SHA: ${{ steps.resolve-backend.outputs.image }}
+        run: |
+          set -euo pipefail
+          mkdir -p tests/fixtures
+          # backend が rust-alc-api で、image が commit の SHA のときだけその commit を見る (dev 等のタグや未解決は main)
+          ref=main
+          if [[ "$BACKEND_REPO" == "ippoan/rust-alc-api" && "$BACKEND_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+            ref="$BACKEND_SHA"
+          fi
+          rev=$(curl -sfL --retry 3 "https://raw.githubusercontent.com/ippoan/rust-alc-api/${ref}/Cargo.toml" \
+            | sed -n 's/^alc-migrations = .*rev = "\([0-9a-f]\{40\}\)".*/\1/p' || true)
+          if [[ -n "$rev" ]]; then
+            echo "::notice::init_local_db.sql: ippoan/alc-migrations@${rev} (rust-alc-api@${ref} の Cargo.toml)"
+            curl -sfL --retry 3 "https://raw.githubusercontent.com/ippoan/alc-migrations/${rev}/scripts/init_local_db.sql" \
+              -o tests/fixtures/init_local_db.sql
+          else
+            echo "::notice::init_local_db.sql: ippoan/rust-alc-api@${ref} の写し (alc-migrations の rev が読めない)"
+            curl -sfL --retry 3 "https://raw.githubusercontent.com/ippoan/rust-alc-api/${ref}/scripts/init_local_db.sql" \
+              -o tests/fixtures/init_local_db.sql
           fi
 
       - name: Start API + DB containers
