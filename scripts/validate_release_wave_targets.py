@@ -17,6 +17,7 @@ Release Wave の設定ミスを CI で早期検知する。これが無いと、
   1. structural (offline) — 各 entry の platform と必須 field。
   2. caller↔registration (online) — org をスキャンし、release-wave.yml
      caller を持つ repo が targets.yaml に登録されているか (両方向)。
+     archived な repo はスキャン対象外 (撤収後も caller が残るため)。
   3. npm_scope 整合 (online) — registered な cloudflare-workers repo が
      @ippoan/* dep を持つなら npm_scope: '@ippoan' を必須化。
 
@@ -132,6 +133,11 @@ def fetch_file(repo: str, path: str) -> str | None:
     return None
 
 
+def active_repo_names(items: list[dict]) -> list[str]:
+    """archived な repo は caller があっても対象外 (撤収済みで targets に登録できない)。"""
+    return [r["full_name"] for r in items if not r.get("archived")]
+
+
 def list_org_repos(org: str) -> list[str]:
     repos: list[str] = []
     page = 1
@@ -143,7 +149,7 @@ def list_org_repos(org: str) -> list[str]:
             break
         if not data:
             break
-        repos += [r["full_name"] for r in data]
+        repos += active_repo_names(data)
         if len(data) < 100:
             break
         page += 1
@@ -237,6 +243,8 @@ def selftest() -> None:
     # no private dep -> ok regardless
     assert npm_scope_violation("r", {}, {"vue", "nuxt"}) is None
     assert collect_deps({"dependencies": {"a": "1"}, "devDependencies": {"b": "2"}}) == {"a", "b"}
+    # archived な repo は caller スキャンから外す
+    assert active_repo_names([{"full_name": "o/a"}, {"full_name": "o/b", "archived": True}]) == ["o/a"]
     print("selftest OK")
 
 
