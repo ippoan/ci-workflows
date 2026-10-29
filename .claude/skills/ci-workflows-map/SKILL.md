@@ -93,7 +93,7 @@ ippoan + ohishi-exp org 共通の **GitHub Actions reusable workflow 集**。各
 ## CCoW / CI から見た立ち位置
 
 - ippoan の全 repo の CI/deploy/merge/release の **共通土台**。各 repo map の「CI は ci-workflows の <x>.yml」という記述はここを指す。
-- 親 issue `ippoan/ci-dashboard#137` (Release Wave) の Phase 4 executor 配線元 (`release-wave-handler.yml` + `config/release-wave-targets.yaml`)。Cloudflare Workers の repo を束ねる (rust-alc-api の Cloud Run の行は撤収で外した、W9)。
+- 親 issue `ippoan/ci-dashboard#137` (Release Wave) の Phase 4 executor 配線元 (`release-wave-handler.yml` + `config/release-wave-targets.yaml`)。release-wave-gcp / rust-alc-api 等を束ねる。
 
 ## 関連 skill
 

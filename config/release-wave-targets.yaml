@@ -14,6 +14,19 @@
 
 targets:
 
+  # ---- Cloud Run (rust-alc-api) ----
+  # gateway + per-domain (tenko/carins/dtako/trouble/camera) は #556 で廃止し
+  # monolith 一本化 (rust-alc-api)。services[] に列挙した service に対し
+  # stage / flip / rollback を実行する。release-wave-gcp proxy 経由で
+  # gcloud run services の traffic 操作を行う。
+  "ippoan/rust-alc-api":
+    platform: cloudrun
+    services:
+      - rust-alc-api
+    gcp_project: cloudsql-sv
+    gcp_region: asia-northeast1
+    preview_hostname: preview-rust-alc-api.ippoan.org
+
   # ---- Cloudflare Workers ----
   "ippoan/auth-worker":
     platform: cloudflare-workers
