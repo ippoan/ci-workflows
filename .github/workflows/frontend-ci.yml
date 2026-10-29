@@ -225,7 +225,7 @@ on:
       # skip され既存挙動に無影響)。
       compat_backend_repo:
         description: >-
-          integration test の相手 backend repo (owner/name)。例: ippoan/rust-alc-api。
+          integration test の相手 backend repo (owner/name)。例: ippoan/<backend repo>。
           設定すると integration test green 後に compatibility report job が走る。
           ⚠ has_integration: true の caller では **必須** — 未設定だと
           integration-test job が loud fail する (Release Wave グラフからの
@@ -242,6 +242,13 @@ on:
         required: false
         type: string
         default: ''
+      alc_migrations_ref:
+        description: >-
+          integration test の DB の初期化 SQL (ippoan/alc-migrations の scripts/init_local_db.sql) を
+          取る ref (branch・tag・commit)。既定は main。
+        required: false
+        type: string
+        default: 'main'
       ci_dashboard_base_url:
         description: 'ci-dashboard worker の base URL (compatibility report 先)'
         required: false
@@ -943,7 +950,7 @@ jobs:
       - name: Require compatibility wiring
         if: inputs.compat_backend_repo == ''
         run: |
-          echo "::error::has_integration: true ですが compat_backend_repo が未設定です。integration test は backend を相手に走るので、Release Wave compatibility edge を記録するために compat_backend_repo (例: ippoan/rust-alc-api) と compat_backend_image_env (例: API_IMAGE) を設定してください。backend を相手にしない / 意図的に compat report しない integration test は compat_backend_repo: 'none' を明示して opt-out できます。"
+          echo "::error::has_integration: true ですが compat_backend_repo が未設定です。integration test は backend を相手に走るので、Release Wave compatibility edge を記録するために compat_backend_repo (例: ippoan/<backend repo>) と compat_backend_image_env (例: API_IMAGE) を設定してください。backend を相手にしない / 意図的に compat report しない integration test は compat_backend_repo: 'none' を明示して opt-out できます。"
           exit 1
 
       - uses: actions/setup-node@v4
@@ -1072,33 +1079,17 @@ jobs:
           fi
 
       # テスト DB の初期化 SQL。正本は ippoan/alc-migrations の scripts/init_local_db.sql で、
-      # **テストする backend の commit の Cargo.toml に固定された alc-migrations の rev** から取る
-      # (backend の image に埋め込まれた migration と同じ rev。rev が違うと migration 174 などと衝突する)。
-      # rust-alc-api は写しの scripts/init_local_db.sql を消した (ippoan/rust-alc-api#754) ので、
-      # そこを直接取らない。rev が読めない (古い backend) ときだけ、その commit の写しに落とす。
-      - name: Fetch init_local_db.sql (alc-migrations, backend の rev)
+      # inputs.alc_migrations_ref (既定 main) から取る。以前は検証する rust-alc-api の commit の
+      # Cargo.toml から rev を読んでいたが、rust-alc-api は撤収した (W9、Refs ippoan/rust-alc-api#680)。
+      - name: Fetch init_local_db.sql (alc-migrations)
         env:
-          BACKEND_REPO: ${{ inputs.compat_backend_repo }}
-          BACKEND_SHA: ${{ steps.resolve-backend.outputs.image }}
+          ALC_MIGRATIONS_REF: ${{ inputs.alc_migrations_ref }}
         run: |
           set -euo pipefail
           mkdir -p tests/fixtures
-          # backend が rust-alc-api で、image が commit の SHA のときだけその commit を見る (dev 等のタグや未解決は main)
-          ref=main
-          if [[ "$BACKEND_REPO" == "ippoan/rust-alc-api" && "$BACKEND_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
-            ref="$BACKEND_SHA"
-          fi
-          rev=$(curl -sfL --retry 3 "https://raw.githubusercontent.com/ippoan/rust-alc-api/${ref}/Cargo.toml" \
-            | sed -n 's/^alc-migrations = .*rev = "\([0-9a-f]\{40\}\)".*/\1/p' || true)
-          if [[ -n "$rev" ]]; then
-            echo "::notice::init_local_db.sql: ippoan/alc-migrations@${rev} (rust-alc-api@${ref} の Cargo.toml)"
-            curl -sfL --retry 3 "https://raw.githubusercontent.com/ippoan/alc-migrations/${rev}/scripts/init_local_db.sql" \
-              -o tests/fixtures/init_local_db.sql
-          else
-            echo "::notice::init_local_db.sql: ippoan/rust-alc-api@${ref} の写し (alc-migrations の rev が読めない)"
-            curl -sfL --retry 3 "https://raw.githubusercontent.com/ippoan/rust-alc-api/${ref}/scripts/init_local_db.sql" \
-              -o tests/fixtures/init_local_db.sql
-          fi
+          echo "::notice::init_local_db.sql: ippoan/alc-migrations@${ALC_MIGRATIONS_REF}"
+          curl -sfL --retry 3 "https://raw.githubusercontent.com/ippoan/alc-migrations/${ALC_MIGRATIONS_REF}/scripts/init_local_db.sql" \
+            -o tests/fixtures/init_local_db.sql
 
       - name: Start API + DB containers
         run: docker compose -f ${{ inputs.integration_compose_file }} up -d --wait

@@ -93,7 +93,7 @@ ippoan + ohishi-exp org 共通の **GitHub Actions reusable workflow 集**。各
 ## CCoW / CI から見た立ち位置
 
 - ippoan の全 repo の CI/deploy/merge/release の **共通土台**。各 repo map の「CI は ci-workflows の <x>.yml」という記述はここを指す。
-- 親 issue `ippoan/ci-dashboard#137` (Release Wave) の Phase 4 executor 配線元 (`release-wave-handler.yml` + `config/release-wave-targets.yaml`)。release-wave-gcp / rust-alc-api 等を束ねる。
+- 親 issue `ippoan/ci-dashboard#137` (Release Wave) の Phase 4 executor 配線元 (`release-wave-handler.yml` + `config/release-wave-targets.yaml`)。Cloudflare Workers の repo を束ねる (rust-alc-api の Cloud Run の行は撤収で外した、W9)。
 
 ## 関連 skill
 
@@ -248,6 +248,7 @@ jobs:
 | `install_command` | `npm ci` | 依存インストールコマンド |
 | `has_tests` | `true` | Vitest 実行するか |
 | `has_integration` | `false` | 統合テスト実行するか。**`true` にしたら `compat_backend_repo` が必須** — 未設定だと `API Integration` job が loud fail する (Release Wave compatibility edge の配線忘れ防止)。backend を相手にしない統合テストは `compat_backend_repo: 'none'` で opt-out |
+| `alc_migrations_ref` | `'main'` | integration test の DB の初期化 SQL (`ippoan/alc-migrations` の `scripts/init_local_db.sql`) を取る ref。rust-alc-api の撤収 (W9) で、backend の `Cargo.toml` から rev を読むのはやめた |
 | `has_deploy` | `true` | デプロイジョブ実行するか |
 | `fast_fail` | `true` | test / typecheck / integration-test の fail 時に run 全体を cancel (赤 run の feedback 高速化、green run には無影響)。cancel は CI App token (要 Actions:write) で行い、無ければ warning のみで劣化 |
 | `npm_scope` | `''` | GitHub Packages スコープ |
