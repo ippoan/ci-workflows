@@ -34,6 +34,13 @@ inputs:
     description: 'wave 経由 deploy なら wave_id。単独 deploy なら空 (= null 格納)'
     required: false
     default: ''
+  environment:
+    description: >-
+      記録先の環境 (`production` | `staging`)。`staging` は staging の SHA を記録するだけで、
+      Release Wave の production 判定には使われない (frontend の staging test が
+      「test した worker の SHA」として引く)。Refs ippoan/ci-dashboard#520。
+    required: false
+    default: 'production'
   webhook_secret:
     description: 'ci-dashboard webhook の shared secret (RELEASE_WAVE_WEBHOOK_SECRET)'
     required: true
@@ -50,6 +57,7 @@ runs:
         CURRENT_TAG: ${{ inputs.current_tag }}
         DEPLOYED_BY: ${{ inputs.deployed_by }}
         WAVE_ID: ${{ inputs.wave_id }}
+        ENVIRONMENT: ${{ inputs.environment }}
         WEBHOOK_SECRET: ${{ inputs.webhook_secret }}
       run: |
         set -euo pipefail
@@ -63,13 +71,19 @@ runs:
           exit 1
         fi
 
+        if [[ "$ENVIRONMENT" != "production" && "$ENVIRONMENT" != "staging" ]]; then
+          echo "::error::environment must be 'production' or 'staging' (got '$ENVIRONMENT')."
+          exit 1
+        fi
+
         # 必須 field の base payload。wave_id / current_tag は空なら省く
         # (= server 側で null 格納)。
         payload=$(jq -nc \
           --arg repo "$REPO" \
           --arg current_image "$CURRENT_IMAGE" \
           --arg deployed_by "$DEPLOYED_BY" \
-          '{repo: $repo, current_image: $current_image, deployed_by: $deployed_by}')
+          --arg environment "$ENVIRONMENT" \
+          '{repo: $repo, current_image: $current_image, deployed_by: $deployed_by, environment: $environment}')
         if [[ -n "$WAVE_ID" ]]; then
           payload=$(printf '%s' "$payload" | jq -c --arg wave_id "$WAVE_ID" '. + {wave_id: $wave_id}')
         fi
@@ -77,7 +91,7 @@ runs:
           payload=$(printf '%s' "$payload" | jq -c --arg current_tag "$CURRENT_TAG" '. + {current_tag: $current_tag}')
         fi
 
-        echo "Reporting backend deploy: $REPO @ $CURRENT_IMAGE${CURRENT_TAG:+ ($CURRENT_TAG)} (by $DEPLOYED_BY${WAVE_ID:+, wave $WAVE_ID})"
+        echo "Reporting backend deploy ($ENVIRONMENT): $REPO @ $CURRENT_IMAGE${CURRENT_TAG:+ ($CURRENT_TAG)} (by $DEPLOYED_BY${WAVE_ID:+, wave $WAVE_ID})"
         curl -fsS -X POST "$CI_DASHBOARD_BASE/webhooks/release-wave/backend-deploy-report" \
           -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
           -H "Content-Type: application/json" \

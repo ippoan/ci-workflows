@@ -11,8 +11,11 @@ inputs:
     required: false
     default: 'https://ci-dashboard.ippoan.org'
   backend_repo:
-    description: 'integration test の相手 backend repo (owner/name)。例: ippoan/rust-alc-api'
-    required: true
+    description: >-
+      integration test の相手 backend repo (owner/name)。例: ippoan/rust-alc-api。
+      staging: false (従来経路) では必須。staging: true では使わず backend_repos を見る。
+    required: false
+    default: ''
   backend_image:
     description: >-
       test 相手の backend image identifier。空なら ci-dashboard の
@@ -24,6 +27,22 @@ inputs:
   prod_version:
     description: '現在 production に出ている (or 出ようとしている) frontend version。通常 github.ref_name'
     required: true
+  staging:
+    description: >-
+      true なら staging 経路: backend_repos の各 repo について ci-dashboard の
+      staging の現 SHA (`backend-current-image?environment=staging`) を引き、
+      取れたものだけを `tested` 配列にして 1 回の POST で報告する。
+      false (既定) は従来動作 (backend_repo 1 件) で一切変わらない。
+      Refs ippoan/ci-dashboard#520。
+    required: false
+    default: 'false'
+  backend_repos:
+    description: >-
+      staging: true のとき必須。test 相手の CF Worker repo (owner/name) のカンマ区切り。
+      空ならエラーで止める (テストしていない組み合わせを緑にしないため、全 worker を既定にしない)。
+      staging: false では無視される。
+    required: false
+    default: ''
   webhook_secret:
     description: 'ci-dashboard webhook の shared secret (RELEASE_WAVE_WEBHOOK_SECRET)'
     required: true
@@ -32,6 +51,7 @@ runs:
   using: composite
   steps:
     - name: Report compatibility to ci-dashboard
+      if: inputs.staging != 'true'
       shell: bash
       env:
         CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
@@ -96,3 +116,71 @@ runs:
           -d "$payload"
         echo ""
         echo "✅ compatibility report sent"
+
+    # staging 経路 (Refs ippoan/ci-dashboard#520)。frontend は staging の worker を
+    # 相手に test 済みなので、その時点の各 worker の staging SHA を tested として報告する。
+    - name: Report staging compatibility to ci-dashboard
+      if: inputs.staging == 'true'
+      shell: bash
+      env:
+        CI_DASHBOARD_BASE: ${{ inputs.ci_dashboard_base_url }}
+        BACKEND_REPOS: ${{ inputs.backend_repos }}
+        PROD_VERSION: ${{ inputs.prod_version }}
+        WEBHOOK_SECRET: ${{ inputs.webhook_secret }}
+        REPO: ${{ github.repository }}
+        CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$WEBHOOK_SECRET" ]]; then
+          echo "::notice::RELEASE_WAVE_WEBHOOK_SECRET not available; skipping staging compatibility report."
+          exit 0
+        fi
+
+        # 全 worker を既定にしない: test していない組み合わせを緑にしないため。
+        repos=$(printf '%s' "$BACKEND_REPOS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d')
+        if [[ -z "$repos" ]]; then
+          echo "::error::staging: true requires backend_repos (comma-separated owner/name)."
+          exit 1
+        fi
+
+        tested='[]'
+        while IFS= read -r backend_repo; do
+          url="$CI_DASHBOARD_BASE/webhooks/release-wave/backend-current-image?repo=$backend_repo&environment=staging"
+          resp=$(curl -sS -w '\n%{http_code}' \
+            -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" "$url" || echo $'\n000')
+          code=$(printf '%s' "$resp" | tail -1)
+          body=$(printf '%s' "$resp" | sed '$d')
+          if [[ "$code" != "200" ]]; then
+            echo "::notice::GET /backend-current-image (staging) for $backend_repo returned $code; excluded from the report."
+            continue
+          fi
+          image=$(printf '%s' "$body" | jq -r '.current_image // ""')
+          if [[ -z "$image" ]]; then
+            echo "::notice::staging response for $backend_repo had no current_image; excluded from the report."
+            continue
+          fi
+          echo "staging: $backend_repo @ $image"
+          tested=$(printf '%s' "$tested" | jq -c \
+            --arg backend_repo "$backend_repo" --arg backend_image "$image" --arg ci_run_url "$CI_RUN_URL" \
+            '. + [{backend_repo: $backend_repo, backend_image: $backend_image, ci_run_url: $ci_run_url}]')
+        done <<< "$repos"
+
+        if [[ "$(printf '%s' "$tested" | jq 'length')" == "0" ]]; then
+          echo "::notice::no staging image found for any backend repo; skipping staging compatibility report."
+          exit 0
+        fi
+
+        payload=$(jq -nc \
+          --arg repo "$REPO" \
+          --arg prod_version "$PROD_VERSION" \
+          --argjson tested "$tested" \
+          '{repo: $repo, prod_version: $prod_version, tested: $tested}')
+
+        echo "Reporting staging: $REPO tested against $(printf '%s' "$tested" | jq -r 'length') backend(s)"
+        curl -fsS -X POST "$CI_DASHBOARD_BASE/webhooks/release-wave/frontend-test-report" \
+          -H "X-Release-Wave-Webhook-Secret: $WEBHOOK_SECRET" \
+          -H "Content-Type: application/json" \
+          -d "$payload"
+        echo ""
+        echo "✅ staging compatibility report sent"
