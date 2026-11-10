@@ -437,25 +437,52 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$payload"
 
-      # flip 成功 = この backend の現 production image が target_tag になった。
+      # flip 成功 = この backend の現 production が target_tag の commit になった。
       # compatibility matrix の基準 (backend::<repo>.current_image) を更新する。
       # (Refs ippoan/ci-dashboard#157 — backend deploy report)
       #
+      # current_image は target_tag が指す commit の 40 桁 SHA で送る (current_tag は
+      # 表示用に tag のまま)。compat は backend の current_image と frontend の
+      # tested_against[].backend_image を完全一致で比べ、frontend 側は commit SHA で
+      # 記録するため、tag を送ると軸が食い違って全 consumer が untested 扱いになる。
+      # SHA を解決できなければ報告そのものを skip する (tag で上書きするより
+      # 前回の正しい記録を残す方がまし)。Refs ippoan/ci-dashboard#522。
+      #
+      # target_tag は dispatch job で形式検証済み (^v?[a-zA-Z0-9._-]{1,64}$)。
+      # ls-remote は checkout が persist した token で caller repo (= github.repository)
+      # を読む。annotated tag は `^{}` (peeled) 行が commit、軽量 tag は tag 行が commit。
+      - name: Resolve target_tag to commit SHA (compatibility)
+        id: tag_sha
+        if: github.event.client_payload.pending_release != true
+        env:
+          TAG: ${{ needs.dispatch.outputs.target_tag }}
+        run: |
+          set -uo pipefail
+          refs=$(git ls-remote --tags origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}" 2>/dev/null) || refs=""
+          sha=$(printf '%s\n' "$refs" | awk -v r="refs/tags/${TAG}^{}" '$2 == r {print $1}')
+          if [[ -z "$sha" ]]; then
+            sha=$(printf '%s\n' "$refs" | awk -v r="refs/tags/${TAG}" '$2 == r {print $1}')
+          fi
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::notice::could not resolve tag '${TAG}' to a commit SHA; skipping backend deploy report"
+            exit 0
+          fi
+          echo "resolved ${TAG} -> ${sha}"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
       # pending_release flip (= Pending releases の Flip / Flip all 経由) では
       # 送らない。pending flip は「すでに deploy 済みの revision を 100% に flip
       # するだけ」で、その image は repo 側 deploy が既に backend-deploy-report で
-      # 記録済み。ここで再 report すると current_image を target_tag (git tag) に、
-      # wave_id を `pending-<repo>-<時刻>` に上書きしてしまい、frontend が記録した
-      # backend_image (= commit SHA) と軸が食い違って全 consumer が untested 扱いに
-      # なり retest UI が乱立する。flip-report と同じ pending_release ガードを掛ける。
-      # Refs ippoan/ci-dashboard#181 / #237。
+      # (commit SHA で) 記録済み。ここで再 report すると wave_id を
+      # `pending-<repo>-<時刻>` に上書きしてしまう。flip-report と同じ
+      # pending_release ガードを掛ける。Refs ippoan/ci-dashboard#181 / #237。
       - name: Report backend deploy (compatibility)
-        if: github.event.client_payload.pending_release != true
+        if: github.event.client_payload.pending_release != true && steps.tag_sha.outputs.sha != ''
         uses: ippoan/ci-workflows/.github/actions/report-backend-deploy@main
         with:
           ci_dashboard_base_url: ${{ inputs.callback_base_url }}
           repo: ${{ github.repository }}
-          current_image: ${{ needs.dispatch.outputs.target_tag }}
+          current_image: ${{ steps.tag_sha.outputs.sha }}
           current_tag: ${{ needs.dispatch.outputs.target_tag }}
           deployed_by: release-wave
           wave_id: ${{ needs.dispatch.outputs.wave_id }}
