@@ -242,6 +242,23 @@ on:
         required: false
         type: string
         default: ''
+      compat_staging_backends:
+        description: >-
+          Refs ippoan/ci-dashboard#520。frontend を staging の CF Worker (ippoan/alc-*-worker)
+          相手にテストする caller 用。worker repo (owner/name) のカンマ区切り。staging deploy 成功後に
+          各 worker の staging の現 git SHA を ci-dashboard から引き、tested として 1 回で報告する
+          (記録されるのは「この frontend が、その時点の staging worker SHA と組んで動いた」事実)。
+          空 (既定) なら無効。
+        required: false
+        type: string
+        default: ''
+      staging_smoke_url:
+        description: >-
+          Refs ippoan/ci-dashboard#520。compat_staging_backends の報告前に GET して 200 を確認する
+          staging の URL。200 以外なら報告せず job を失敗にする。空なら確認しない。
+        required: false
+        type: string
+        default: ''
       alc_migrations_ref:
         description: >-
           integration test の DB の初期化 SQL (ippoan/alc-migrations の scripts/init_local_db.sql) を
@@ -1152,6 +1169,37 @@ jobs:
           # integration-test が解決・使用した SHA をそのまま記録する (test した
           # image == 記録 image)。明示 input があればそれを優先 (retest 経路)。
           backend_image: ${{ inputs.compat_backend_image != '' && inputs.compat_backend_image || needs.integration-test.outputs.backend_image }}
+          prod_version: ${{ github.ref_name }}
+          webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
+
+  # Refs ippoan/ci-dashboard#520: staging deploy 成功後に、staging の worker SHA を
+  # tested として ci-dashboard に報告する。staging の job は immediate か upload→flip の
+  # どちらか片方だけが走るので、どちらかが success なら実行する。
+  # opt-in: compat_staging_backends が空なら skip (既存挙動に無影響)。
+  report-compatibility-staging:
+    name: Report Compatibility (staging)
+    needs: [deploy-staging-immediate, deploy-staging-flip]
+    if: >-
+      always() &&
+      inputs.compat_staging_backends != '' &&
+      (needs.deploy-staging-immediate.result == 'success' || needs.deploy-staging-flip.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Smoke check staging
+        if: inputs.staging_smoke_url != ''
+        env:
+          SMOKE_URL: ${{ inputs.staging_smoke_url }}
+        run: |
+          code=$(curl -fsS -o /dev/null -w '%{http_code}' "$SMOKE_URL" || true)
+          if [ "$code" != "200" ]; then
+            echo "::error::staging smoke check failed (HTTP ${code:-none}); not reporting compatibility."
+            exit 1
+          fi
+      - uses: ippoan/ci-workflows/.github/actions/report-frontend-compat@main
+        with:
+          ci_dashboard_base_url: ${{ inputs.ci_dashboard_base_url }}
+          staging: 'true'
+          backend_repos: ${{ inputs.compat_staging_backends }}
           prod_version: ${{ github.ref_name }}
           webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
 
