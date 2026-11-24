@@ -353,16 +353,20 @@ jobs:
             # filter=latest (API default) — 同名 check は最新 attempt のみ。
             # --paginate は page ごとに配列を出すので jq -s 'add' で連結する。
             if ! raw=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
-              --jq '[.check_runs[] | {name, status, conclusion}]'); then
+              --jq '[.check_runs[] | {name, status, conclusion, completed_at}]'); then
               echo "::error title=auto-merge all-checks gate::check-runs API を読めませんでした。403 (Resource not accessible by integration) の場合は GitHub App (CI_APP_ID) の installation permissions に 'Checks: Read-only' を追加してください (Refs ippoan/ci-workflows#171)"
               exit 1
             fi
-            runs=$(echo "$raw" | jq -s 'add // []')
+            # 終わったかは status だけで見ない。GitHub が completed_at・conclusion を埋めたまま
+            # status を in_progress で残す check run がある (2026-11-23 ohishi-exp/nuxt-dtako-admin#1271、
+            # 11-24 #1279 で実測。job API・check-run API とも同じ値で、待っても戻らない)。
+            # どれか 1 つでも「終わった」と言っていれば終わりとみなす (done)。
+            runs=$(echo "$raw" | jq -s 'add // [] | map(. + {done: (.status == "completed" or .completed_at != null or .conclusion != null)})')
             # 自分達 (各 caller の Auto Merge job) は永遠に in_progress に見える
             # ので名前で除外する。
             bad=$(echo "$runs" | jq -r '[.[]
               | select((.name | test("Auto Merge") | not)
-                  and .status == "completed"
+                  and .done
                   and ((.conclusion // "") as $c | ["success","neutral","skipped"] | index($c) | not))]
               | map(.name) | unique | join(", ")')
             if [ -n "$bad" ]; then
@@ -370,7 +374,7 @@ jobs:
               exit 1
             fi
             pending=$(echo "$runs" | jq '[.[]
-              | select((.name | test("Auto Merge") | not) and .status != "completed")] | length')
+              | select((.name | test("Auto Merge") | not) and (.done | not))] | length')
             if [ "$pending" -eq 0 ]; then
               echo "all sibling checks completed & green"
               break
